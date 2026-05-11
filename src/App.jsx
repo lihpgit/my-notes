@@ -210,66 +210,71 @@ function NotesApp({ user, onLogout }) {
         <p style={{ fontSize: 14, opacity: .85 }}>共 {notes.length} 篇文章 · 记录学习与成长</p>
       </div>
 
-      <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 24px 60px" }}>
-        <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-          <div style={{ flex: 1, minWidth: 200, position: "relative" }}>
-            <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#aaa" }}>🔍</span>
-            <input placeholder="搜索文章..." value={search} onChange={(e) => setSearch(e.target.value)}
-              style={{ width: "100%", padding: "10px 12px 10px 36px", border: "1px solid #e0e0e0", borderRadius: 8, fontSize: 14, background: "#fff", fontFamily: "'Noto Serif SC',serif" }} />
+      <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 24px 60px", display: "flex", gap: 24 }}>
+        {/* 左侧标签侧栏 */}
+        <aside style={{ width: 180, flexShrink: 0, position: "sticky", top: 80, alignSelf: "flex-start" }}>
+          <div style={{ background: "#fff", borderRadius: 10, padding: "16px", boxShadow: "0 1px 4px rgba(0,0,0,.05)" }}>
+            <h4 style={{ fontSize: 13, fontWeight: 600, color: "#999", marginBottom: 12 }}>标签</h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <button onClick={() => setFilterTag(null)}
+                style={{ textAlign: "left", padding: "6px 10px", borderRadius: 6, border: "none", background: !filterTag ? "#f0f0f0" : "transparent", color: !filterTag ? "#1a1a1a" : "#666", fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: !filterTag ? 600 : 400 }}>
+                全部 <span style={{ fontSize: 11, color: "#bbb", marginLeft: 4 }}>{notes.length}</span>
+              </button>
+              {allTags.map((t) => {
+                const c = TAG_COLORS[t] || { bg: "#f5f5f5", fg: "#666" };
+                const count = notes.filter((n) => (n.tags || []).includes(t)).length;
+                return (
+                  <button key={t} onClick={() => setFilterTag(filterTag === t ? null : t)}
+                    style={{ textAlign: "left", padding: "6px 10px", borderRadius: 6, border: "none", background: filterTag === t ? c.bg : "transparent", color: filterTag === t ? c.fg : "#666", fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: filterTag === t ? 600 : 400 }}>
+                    {t} <span style={{ fontSize: 11, color: "#bbb", marginLeft: 4 }}>{count}</span>
+                  </button>
+                );
+              })}
+              {allTags.length === 0 && <p style={{ fontSize: 12, color: "#ccc", padding: "4px 10px" }}>暂无标签</p>}
+            </div>
           </div>
-          <button onClick={addNote}
-            style={{ padding: "10px 20px", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
-            ＋ 写文章
-          </button>
-        </div>
+        </aside>
 
-        {allTags.length > 0 && (
-          <div style={{ display: "flex", gap: 8, marginBottom: 24, flexWrap: "wrap" }}>
-            <button onClick={() => setFilterTag(null)}
-              style={{ padding: "5px 14px", borderRadius: 20, border: "1px solid #ddd", background: !filterTag ? "#1a1a1a" : "#fff", color: !filterTag ? "#fff" : "#666", fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>全部</button>
-            {allTags.map((t) => {
-              const c = TAG_COLORS[t] || { bg: "#f5f5f5", fg: "#666" };
-              return (
-                <button key={t} onClick={() => setFilterTag(filterTag === t ? null : t)}
-                  style={{ padding: "5px 14px", borderRadius: 20, border: filterTag === t ? "1px solid " + c.fg : "1px solid #ddd", background: filterTag === t ? c.bg : "#fff", color: filterTag === t ? c.fg : "#666", fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>{t}</button>
-              );
-            })}
+        {/* 右侧主内容 */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 200, position: "relative" }}>
+              <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#aaa" }}>🔍</span>
+              <input placeholder="搜索文章..." value={search} onChange={(e) => setSearch(e.target.value)}
+                style={{ width: "100%", padding: "10px 12px 10px 36px", border: "1px solid #e0e0e0", borderRadius: 8, fontSize: 14, background: "#fff", fontFamily: "'Noto Serif SC',serif" }} />
+            </div>
+            <button onClick={addNote}
+              style={{ padding: "10px 20px", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
+              ＋ 写文章
+            </button>
           </div>
-        )}
 
-        {filtered.length === 0 && (
-          <div style={{ textAlign: "center", padding: "60px 0", color: "#bbb" }}>
-            <p style={{ fontSize: 48, marginBottom: 16 }}>📝</p>
-            <p>{search || filterTag ? "没有找到匹配的文章" : "还没有文章，点击「写文章」开始创作"}</p>
-          </div>
-        )}
+          {filtered.length === 0 && (
+            <div style={{ textAlign: "center", padding: "60px 0", color: "#bbb" }}>
+              <p style={{ fontSize: 48, marginBottom: 16 }}>📝</p>
+              <p>{search || filterTag ? "没有找到匹配的文章" : "还没有文章，点击「写文章」开始创作"}</p>
+            </div>
+          )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 20 }}>
-          {filtered.map((note, i) => (
-            <div key={note.id} className="card-anim hover-lift" onClick={() => openNote(note.id)}
-              style={{ background: "#fff", borderRadius: 12, overflow: "hidden", cursor: "pointer", boxShadow: "0 1px 4px rgba(0,0,0,.05)", animationDelay: i * .06 + "s" }}>
-              <div style={{ height: 120, background: BANNERS[note.banner || 0], position: "relative" }}>
-                <div style={{ position: "absolute", bottom: 10, left: 12, display: "flex", gap: 6 }}>
-                  {(note.tags || []).map((t) => {
-                    const c = TAG_COLORS[t] || { bg: "#fff", fg: "#333" };
-                    return <span key={t} style={{ padding: "2px 10px", borderRadius: 12, fontSize: 11, fontWeight: 600, background: "rgba(255,255,255,.9)", color: c.fg }}>{t}</span>;
-                  })}
-                </div>
-              </div>
-              <div style={{ padding: "16px 18px 18px" }}>
-                <h3 style={{ fontSize: 16, fontWeight: 700, color: "#1a1a1a", marginBottom: 8, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+          <div style={{ background: "#fff", borderRadius: 10, overflow: "hidden", boxShadow: "0 1px 4px rgba(0,0,0,.05)" }}>
+            {filtered.map((note, i) => (
+              <div key={note.id} className="card-anim" onClick={() => openNote(note.id)}
+                style={{ padding: "14px 18px", cursor: "pointer", borderBottom: i < filtered.length - 1 ? "1px solid #f0f0f0" : "none", animationDelay: i * .04 + "s", transition: "background .15s" }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#fafafa"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
+                <h3 style={{ fontSize: 15, fontWeight: 600, color: "#1a1a1a", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {note.title || "无标题"}
                 </h3>
-                <p style={{ fontSize: 13, color: "#888", lineHeight: 1.6, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", marginBottom: 12 }}>
-                  {(note.content || "").replace(/[#*`>\-\[\]()!]/g, "").slice(0, 100) || "空文章..."}
-                </p>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#bbb" }}>
-                  <span>{fmtDate(note.updated_at)}</span>
-                  <span>{readTime(note.content)}</span>
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  {(note.tags || []).map((t) => {
+                    const c = TAG_COLORS[t] || { bg: "#f5f5f5", fg: "#999" };
+                    return <span key={t} style={{ fontSize: 12, color: c.fg, opacity: .75 }}>{t}</span>;
+                  })}
+                  {(note.tags || []).length === 0 && <span style={{ fontSize: 12, color: "#ccc" }}>无标签</span>}
                 </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       </div>
     </div>
@@ -342,19 +347,29 @@ function NotesApp({ user, onLogout }) {
 
         <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 13, color: "#999" }}>标签：</span>
-          {TAGS.map((t) => {
-            const active = (activeNote.tags || []).includes(t);
-            const c = TAG_COLORS[t];
+          {(activeNote.tags || []).map((t) => {
+            const c = TAG_COLORS[t] || { bg: "#f0f0f0", fg: "#666" };
             return (
-              <button key={t} onClick={() => {
-                const tags = activeNote.tags || [];
-                update("tags", active ? tags.filter((x) => x !== t) : [...tags, t]);
-              }}
-                style={{ padding: "4px 12px", borderRadius: 14, border: active ? "1px solid " + c.fg : "1px solid #ddd", background: active ? c.bg : "#fff", color: active ? c.fg : "#999", fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s" }}>
+              <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 14, background: c.bg, color: c.fg, fontSize: 12, fontFamily: "'Noto Serif SC',serif" }}>
                 {t}
-              </button>
+                <span onClick={() => update("tags", (activeNote.tags || []).filter((x) => x !== t))}
+                  style={{ cursor: "pointer", fontSize: 14, lineHeight: 1, opacity: .6 }}>×</span>
+              </span>
             );
           })}
+          <input
+            placeholder="输入标签后回车"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && e.target.value.trim()) {
+                const tag = e.target.value.trim();
+                if (!(activeNote.tags || []).includes(tag)) {
+                  update("tags", [...(activeNote.tags || []), tag]);
+                }
+                e.target.value = "";
+              }
+            }}
+            style={{ padding: "4px 10px", border: "1px solid #ddd", borderRadius: 14, fontSize: 12, fontFamily: "'Noto Serif SC',serif", width: 120, background: "#fff" }}
+          />
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, minHeight: "calc(100vh - 220px)" }}>
