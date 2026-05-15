@@ -151,6 +151,37 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const saveTimer = useRef(null);
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
 
+  /* ─── 浏览器历史管理（拦截返回键） ─── */
+  const skipPopRef = useRef(false);
+
+  useEffect(() => {
+    // 初始化：替换当前状态为 list
+    window.history.replaceState({ view: "list", noteId: null }, "");
+  }, []);
+
+  useEffect(() => {
+    function onPop(e) {
+      if (skipPopRef.current) { skipPopRef.current = false; return; }
+      const st = e.state;
+      if (st) {
+        setView(st.view || "list");
+        setActiveId(st.noteId || null);
+        if (st.view !== "list") window.scrollTo(0, 0);
+      } else {
+        setView("list");
+        setActiveId(null);
+      }
+    }
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  function navPush(v, nid) {
+    window.history.pushState({ view: v, noteId: nid || null }, "");
+    setView(v);
+    setActiveId(nid || null);
+  }
+
   useEffect(() => { loadNotes(); }, []);
 
   async function loadNotes() {
@@ -193,8 +224,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   async function addNote() {
     const n = { id: genId(), title: "", content: "", tags: [], banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
     setNotes((p) => [n, ...p]);
-    setActiveId(n.id);
-    setView("edit");
+    navPush("edit", n.id);
     await supabase.from("notes").insert(n);
   }
 
@@ -204,10 +234,13 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     setNotes((p) => p.filter((n) => n.id !== activeId));
     setActiveId(null);
     setView("list");
+    // 删除后回到列表，清理历史栈到 list
+    window.history.pushState({ view: "list", noteId: null }, "");
   }
 
-  function openNote(nid) { setActiveId(nid); setView("read"); window.scrollTo(0, 0); }
-  function backToList() { setView("list"); setActiveId(null); }
+  function openNote(nid) { navPush("read", nid); window.scrollTo(0, 0); }
+  function backToList() { window.history.back(); }
+  function goToEdit(nid) { navPush("edit", nid); }
 
   const themeBtn = (
     <button onClick={onToggleDark}
@@ -344,7 +377,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           <button onClick={backToList} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 返回列表</button>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {themeBtn}
-            <button onClick={() => setView("edit")} style={{ padding: "5px 14px", background: T.btnBg, color: T.btnText, border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>编辑</button>
+            <button onClick={() => goToEdit(activeId)} style={{ padding: "5px 14px", background: T.btnBg, color: T.btnText, border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>编辑</button>
             <button onClick={deleteNote} style={{ padding: "5px 14px", background: T.deleteBg, color: T.deleteText, border: `1px solid ${T.deleteBorder}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>删除</button>
           </div>
         </div>
@@ -388,7 +421,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
         <div style={{ padding: "0 24px", height: 48, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
             <button onClick={backToList} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 首页</button>
-            <button onClick={() => setView("read")} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 返回阅读</button>
+            <button onClick={() => window.history.back()} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 返回阅读</button>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {themeBtn}
