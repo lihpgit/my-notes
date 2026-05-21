@@ -149,6 +149,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const saveTimer = useRef(null);
+  const fileInputRef = useRef(null);
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
 
   /* ─── 浏览器历史管理（拦截返回键） ─── */
@@ -242,6 +243,38 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   function backToList() { window.history.back(); }
   function goToEdit(nid) { navPush("edit", nid); }
 
+  /* ─── 导入 .md 文件（支持批量） ─── */
+  async function importMd(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const newNotes = [];
+    for (const file of files) {
+      const text = await file.text();
+      const m = text.match(/^#\s+(.+)$/m);
+      const title = m ? m[1].trim() : file.name.replace(/\.(md|markdown|txt)$/i, "");
+      const content = m ? text.replace(/^#\s+.+\n*/, "") : text;
+      newNotes.push({ id: genId(), title, content, tags: [], banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
+    }
+    setNotes((p) => [...newNotes, ...p]);
+    await supabase.from("notes").insert(newNotes);
+    if (newNotes.length === 1) {
+      navPush("edit", newNotes[0].id);
+    }
+    e.target.value = "";
+  }
+
+  /* ─── 导出 .md 文件 ─── */
+  function exportMd(note) {
+    const md = (note.title ? "# " + note.title + "\n\n" : "") + (note.content || "");
+    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = (note.title || "未命名笔记") + ".md";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   const themeBtn = (
     <button onClick={onToggleDark}
       style={{ fontSize: 18, background: "none", border: "none", cursor: "pointer", padding: "4px", lineHeight: 1 }}
@@ -312,6 +345,11 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
               <input placeholder="搜索文章..." value={search} onChange={(e) => setSearch(e.target.value)}
                 style={{ width: "100%", padding: "10px 12px 10px 36px", border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, background: T.inputBg, fontFamily: "'Noto Serif SC',serif", color: T.text }} />
             </div>
+            <input ref={fileInputRef} type="file" accept=".md,.markdown,.txt" multiple onChange={importMd} style={{ display: "none" }} />
+            <button onClick={() => fileInputRef.current?.click()}
+              style={{ padding: "10px 16px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
+              📄 导入
+            </button>
             <button onClick={addNote}
               style={{ padding: "10px 20px", background: T.btnBg, color: T.btnText, border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
               ＋ 写文章
@@ -350,12 +388,20 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                       {plain || "暂无内容"}
                     </p>
                   </div>
-                  <button onClick={(e) => { e.stopPropagation(); if (confirm("确定删除「" + (note.title || "无标题") + "」吗？")) { supabase.from("notes").delete().eq("id", note.id).then(() => setNotes((p) => p.filter((n) => n.id !== note.id))); } }}
-                    style={{ padding: "6px 14px", marginRight: 14, fontSize: 12, color: T.deleteText, background: "none", border: `1px solid transparent`, borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", flexShrink: 0, transition: "all .15s", opacity: .6 }}
-                    onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.deleteBorder; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
-                    删除
-                  </button>
+                  <div style={{ display: "flex", gap: 4, flexShrink: 0, marginRight: 14 }}>
+                    <button onClick={(e) => { e.stopPropagation(); exportMd(note); }}
+                      style={{ padding: "6px 10px", fontSize: 12, color: T.textMuted, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
+                      onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
+                      导出
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); if (confirm("确定删除「" + (note.title || "无标题") + "」吗？")) { supabase.from("notes").delete().eq("id", note.id).then(() => setNotes((p) => p.filter((n) => n.id !== note.id))); } }}
+                      style={{ padding: "6px 10px", fontSize: 12, color: T.deleteText, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
+                      onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.deleteBorder; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
+                      删除
+                    </button>
+                  </div>
                 </div>
               );
             })}
