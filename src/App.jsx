@@ -223,7 +223,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   }
 
   async function addNote() {
-    const n = { id: genId(), title: "", content: "", tags: [], banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
+    const n = { id: genId(), title: "", content: "", tags: [], scripts: [], banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
     setNotes((p) => [n, ...p]);
     navPush("edit", n.id);
     await supabase.from("notes").insert(n);
@@ -273,6 +273,79 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     a.download = (note.title || "未命名笔记") + ".md";
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  /* ─── 脚本管理 ─── */
+  const scriptInputRef = useRef(null);
+  const textareaRef = useRef(null);
+
+  async function addScripts(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const existing = activeNote.scripts || [];
+    const newScripts = [];
+    for (const f of files) {
+      const content = await f.text();
+      newScripts.push({ name: f.name, content });
+    }
+    update("scripts", [...existing, ...newScripts]);
+    // 在光标位置插入脚本标记
+    const ta = textareaRef.current;
+    if (ta) {
+      const pos = ta.selectionStart || 0;
+      const text = activeNote.content || "";
+      const markers = files.map(f => `{{script:${f.name}}}`).join("\n");
+      const before = text.slice(0, pos);
+      const after = text.slice(pos);
+      const pad = before.length > 0 && !before.endsWith("\n") ? "\n" : "";
+      const padAfter = after.length > 0 && !after.startsWith("\n") ? "\n" : "";
+      const newContent = before + pad + markers + padAfter + after;
+      update("content", newContent);
+      // 恢复光标到插入内容之后
+      setTimeout(() => {
+        const newPos = pos + pad.length + markers.length + padAfter.length;
+        ta.focus();
+        ta.setSelectionRange(newPos, newPos);
+      }, 50);
+    }
+    e.target.value = "";
+  }
+
+  function removeScript(idx) {
+    const s = (activeNote.scripts || [])[idx];
+    const scripts = [...(activeNote.scripts || [])];
+    scripts.splice(idx, 1);
+    update("scripts", scripts);
+    // 同时移除正文中该脚本的标记
+    if (s) {
+      const marker = `{{script:${s.name}}}`;
+      const content = (activeNote.content || "").split(marker).join("").replace(/\n{3,}/g, "\n\n");
+      update("content", content);
+    }
+  }
+
+  function downloadScript(script) {
+    const blob = new Blob([script.content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = script.name;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  /* 渲染正文：将 {{script:xxx}} 替换为可点击的脚本链接 */
+  function renderContent(content, scripts) {
+    const html = marked.parse(content || "*暂无内容*");
+    // 替换 {{script:name}} 为高亮下载链接
+    return html.replace(/\{\{script:(.+?)\}\}/g, (_, name) => {
+      const s = (scripts || []).find(x => x.name === name);
+      if (!s) return `<span style="color:#999;font-size:13px">⚠️ 脚本未找到: ${name}</span>`;
+      const bg = dark ? "#1e293b" : "#eef2ff";
+      const border = dark ? "#334155" : "#c7d2fe";
+      const color = dark ? "#60a5fa" : "#4338ca";
+      return `<span class="script-link" data-script="${name}" style="display:inline-flex;align-items:center;gap:5px;padding:4px 14px;border-radius:8px;background:${bg};border:1px solid ${border};cursor:pointer;font-size:13px;color:${color};font-family:'Noto Serif SC',serif;transition:opacity .15s" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">📎 ${name} <span style="font-size:11px;opacity:.7">↓点击下载</span></span>`;
+    });
   }
 
   const themeBtn = (
@@ -453,7 +526,16 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       </div>
 
       <div style={{ padding: "28px 24px 80px" }}>
-        <div className="article-body" dangerouslySetInnerHTML={{ __html: marked.parse(activeNote.content || "*暂无内容*") }} />
+        <div className="article-body"
+          onClick={(e) => {
+            const el = e.target.closest(".script-link");
+            if (el) {
+              const name = el.getAttribute("data-script");
+              const s = (activeNote.scripts || []).find(x => x.name === name);
+              if (s) downloadScript(s);
+            }
+          }}
+          dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*暂无内容*", activeNote.scripts) }} />
       </div>
     </div>
   );
@@ -511,20 +593,37 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           />
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, minHeight: "calc(100vh - 220px)" }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 13, color: T.textMuted }}>附件脚本：</span>
+          {(activeNote.scripts || []).map((s, idx) => (
+            <span key={idx} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 12px", borderRadius: 14, background: dark ? "#1e293b" : "#eef2ff", border: `1px solid ${dark ? "#334155" : "#c7d2fe"}`, fontSize: 12 }}>
+              <span style={{ color: dark ? "#93c5fd" : "#4338ca" }}>🐍 {s.name}</span>
+              <button onClick={() => downloadScript(s)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: dark ? "#60a5fa" : "#6366f1", padding: 0, fontFamily: "'Noto Serif SC',serif" }}>下载</button>
+              <button onClick={() => removeScript(idx)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.deleteText, padding: 0, lineHeight: 1 }}>×</button>
+            </span>
+          ))}
+          <input ref={scriptInputRef} type="file" accept=".py,.sh,.js,.ts,.sql,.bat,.rb,.go,.java,.kt,.swift,.r,.pl,.lua,.yaml,.yml,.json,.xml,.toml,.cfg,.ini,.conf" multiple onChange={addScripts} style={{ display: "none" }} />
+          <button onClick={() => scriptInputRef.current?.click()}
+            style={{ padding: "4px 12px", borderRadius: 14, border: `1px dashed ${T.borderDashed}`, background: "transparent", color: T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>
+            ＋ 添加脚本
+          </button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, minHeight: "calc(100vh - 260px)" }}>
           <div style={{ display: "flex", flexDirection: "column" }}>
             <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
               <span>Markdown 编辑</span>
               <span>{wordCount(activeNote.content)} 字</span>
             </div>
-            <textarea value={activeNote.content} onChange={(e) => update("content", e.target.value)}
+            <textarea ref={textareaRef} value={activeNote.content} onChange={(e) => update("content", e.target.value)}
               placeholder={"开始写作...\n\n支持 Markdown 语法：\n# 标题\n## 二级标题\n**加粗** *斜体*\n- 列表项\n> 引用\n`代码`\n```代码块```"}
               style={{ flex: 1, border: `1px solid ${T.borderInput}`, borderRadius: 10, padding: "16px 18px", fontSize: 14, lineHeight: 1.8, resize: "none", fontFamily: "'Fira Code','Noto Serif SC',serif", color: T.text, background: T.editorBg }} />
           </div>
           <div style={{ display: "flex", flexDirection: "column" }}>
             <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8 }}>实时预览</div>
-            <div style={{ flex: 1, border: `1px solid ${T.borderInput}`, borderRadius: 10, padding: "16px 18px", background: T.editorBg, overflowY: "auto" }}>
-              <div className="article-body" dangerouslySetInnerHTML={{ __html: marked.parse(activeNote.content || "*开始写作后这里会显示预览...*") }} />
+            <div style={{ flex: 1, border: `1px solid ${T.borderInput}`, borderRadius: 10, padding: "16px 18px", background: T.editorBg, overflowY: "auto" }}
+              onClick={(e) => { const el = e.target.closest(".script-link"); if (el) { const name = el.getAttribute("data-script"); const s = (activeNote.scripts || []).find(x => x.name === name); if (s) downloadScript(s); } }}>
+              <div className="article-body" dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*开始写作后这里会显示预览...*", activeNote.scripts) }} />
             </div>
           </div>
         </div>
