@@ -148,6 +148,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [scriptEditor, setScriptEditor] = useState(null); // {name, ext, content}
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
@@ -332,6 +333,28 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     a.download = script.name;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  /* ─── 手动创建脚本 ─── */
+  function saveManualScript() {
+    if (!scriptEditor || !scriptEditor.name.trim() || !scriptEditor.content.trim()) return;
+    const fileName = scriptEditor.name.trim() + scriptEditor.ext;
+    const newScript = { name: fileName, content: scriptEditor.content };
+    const existing = activeNote.scripts || [];
+    update("scripts", [...existing, newScript]);
+    // 插入标记到光标位置
+    const ta = textareaRef.current;
+    if (ta) {
+      const pos = ta.selectionStart || 0;
+      const text = activeNote.content || "";
+      const marker = `{{script:${fileName}}}`;
+      const before = text.slice(0, pos);
+      const after = text.slice(pos);
+      const pad = before.length > 0 && !before.endsWith("\n") ? "\n" : "";
+      const padAfter = after.length > 0 && !after.startsWith("\n") ? "\n" : "";
+      update("content", before + pad + marker + padAfter + after);
+    }
+    setScriptEditor(null);
   }
 
   /* 渲染正文：将 {{script:xxx}} 替换为可点击的脚本链接 */
@@ -605,9 +628,61 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           <input ref={scriptInputRef} type="file" accept=".py,.sh,.js,.ts,.sql,.bat,.rb,.go,.java,.kt,.swift,.r,.pl,.lua,.yaml,.yml,.json,.xml,.toml,.cfg,.ini,.conf" multiple onChange={addScripts} style={{ display: "none" }} />
           <button onClick={() => scriptInputRef.current?.click()}
             style={{ padding: "4px 12px", borderRadius: 14, border: `1px dashed ${T.borderDashed}`, background: "transparent", color: T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>
-            ＋ 添加脚本
+            ＋ 上传脚本
+          </button>
+          <button onClick={() => setScriptEditor({ name: "", ext: ".py", content: "" })}
+            style={{ padding: "4px 12px", borderRadius: 14, border: `1px dashed ${dark ? "#334155" : "#c7d2fe"}`, background: "transparent", color: dark ? "#60a5fa" : "#4338ca", fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>
+            ✏️ 编写脚本
           </button>
         </div>
+
+        {scriptEditor && (
+          <div style={{ position: "fixed", inset: 0, zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.5)" }}
+            onClick={(e) => { if (e.target === e.currentTarget) setScriptEditor(null); }}>
+            <div style={{ width: 600, maxWidth: "90vw", maxHeight: "85vh", background: T.card, borderRadius: 12, boxShadow: T.shadowCard, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <h3 style={{ fontSize: 16, fontWeight: 600, color: T.text }}>编写脚本</h3>
+                <button onClick={() => setScriptEditor(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: T.textMuted, lineHeight: 1 }}>×</button>
+              </div>
+              <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 12, flex: 1, overflow: "auto" }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input placeholder="脚本名称" value={scriptEditor.name} onChange={(e) => setScriptEditor({ ...scriptEditor, name: e.target.value })}
+                    style={{ flex: 1, padding: "8px 12px", border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, background: T.inputBg, color: T.text, fontFamily: "'Noto Serif SC',serif" }} />
+                  <select value={scriptEditor.ext} onChange={(e) => setScriptEditor({ ...scriptEditor, ext: e.target.value })}
+                    style={{ padding: "8px 12px", border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, background: T.inputBg, color: T.text, fontFamily: "'Fira Code',monospace", cursor: "pointer" }}>
+                    <option value=".py">.py</option>
+                    <option value=".sh">.sh</option>
+                    <option value=".js">.js</option>
+                    <option value=".ts">.ts</option>
+                    <option value=".sql">.sql</option>
+                    <option value=".java">.java</option>
+                    <option value=".kt">.kt</option>
+                    <option value=".go">.go</option>
+                    <option value=".rb">.rb</option>
+                    <option value=".yaml">.yaml</option>
+                    <option value=".json">.json</option>
+                    <option value=".xml">.xml</option>
+                    <option value=".toml">.toml</option>
+                    <option value=".bat">.bat</option>
+                    <option value=".txt">.txt</option>
+                  </select>
+                </div>
+                <textarea placeholder="在此输入脚本内容..." value={scriptEditor.content} onChange={(e) => setScriptEditor({ ...scriptEditor, content: e.target.value })}
+                  style={{ flex: 1, minHeight: 280, border: `1px solid ${T.borderInput}`, borderRadius: 8, padding: "12px 14px", fontSize: 13, lineHeight: 1.6, resize: "none", fontFamily: "'Fira Code',monospace", color: T.text, background: T.editorBg }} />
+              </div>
+              <div style={{ padding: "12px 20px", borderTop: `1px solid ${T.border}`, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <button onClick={() => setScriptEditor(null)}
+                  style={{ padding: "8px 20px", borderRadius: 8, border: `1px solid ${T.borderDashed}`, background: "transparent", color: T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>
+                  取消
+                </button>
+                <button onClick={saveManualScript} disabled={!scriptEditor.name.trim() || !scriptEditor.content.trim()}
+                  style={{ padding: "8px 20px", borderRadius: 8, border: "none", background: T.btnBg, color: T.btnText, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", opacity: (!scriptEditor.name.trim() || !scriptEditor.content.trim()) ? .4 : 1 }}>
+                  完成
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, minHeight: "calc(100vh - 260px)" }}>
           <div style={{ display: "flex", flexDirection: "column" }}>
