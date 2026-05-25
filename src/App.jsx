@@ -289,20 +289,22 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       const content = await f.text();
       newScripts.push({ name: f.name, content });
     }
-    update("scripts", [...existing, ...newScripts]);
+    const allScripts = [...existing, ...newScripts];
     // 在光标位置插入脚本标记
     const ta = textareaRef.current;
+    const pos = ta ? (ta.selectionStart || 0) : (activeNote.content || "").length;
+    const text = activeNote.content || "";
+    const markers = files.map(f => `{{script:${f.name}}}`).join("\n");
+    const before = text.slice(0, pos);
+    const after = text.slice(pos);
+    const pad = before.length > 0 && !before.endsWith("\n") ? "\n" : "";
+    const padAfter = after.length > 0 && !after.startsWith("\n") ? "\n" : "";
+    const newContent = before + pad + markers + padAfter + after;
+    // 一次性更新 scripts 和 content
+    const updated = notes.map((n) => n.id === activeId ? { ...n, scripts: allScripts, content: newContent, updated_at: Date.now() } : n);
+    setNotes(updated);
+    save(updated.find((n) => n.id === activeId));
     if (ta) {
-      const pos = ta.selectionStart || 0;
-      const text = activeNote.content || "";
-      const markers = files.map(f => `{{script:${f.name}}}`).join("\n");
-      const before = text.slice(0, pos);
-      const after = text.slice(pos);
-      const pad = before.length > 0 && !before.endsWith("\n") ? "\n" : "";
-      const padAfter = after.length > 0 && !after.startsWith("\n") ? "\n" : "";
-      const newContent = before + pad + markers + padAfter + after;
-      update("content", newContent);
-      // 恢复光标到插入内容之后
       setTimeout(() => {
         const newPos = pos + pad.length + markers.length + padAfter.length;
         ta.focus();
@@ -340,20 +342,21 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     if (!scriptEditor || !scriptEditor.name.trim() || !scriptEditor.content.trim()) return;
     const fileName = scriptEditor.name.trim() + scriptEditor.ext;
     const newScript = { name: fileName, content: scriptEditor.content };
-    const existing = activeNote.scripts || [];
-    update("scripts", [...existing, newScript]);
+    const newScripts = [...(activeNote.scripts || []), newScript];
     // 插入标记到光标位置
     const ta = textareaRef.current;
-    if (ta) {
-      const pos = ta.selectionStart || 0;
-      const text = activeNote.content || "";
-      const marker = `{{script:${fileName}}}`;
-      const before = text.slice(0, pos);
-      const after = text.slice(pos);
-      const pad = before.length > 0 && !before.endsWith("\n") ? "\n" : "";
-      const padAfter = after.length > 0 && !after.startsWith("\n") ? "\n" : "";
-      update("content", before + pad + marker + padAfter + after);
-    }
+    const pos = ta ? (ta.selectionStart || 0) : (activeNote.content || "").length;
+    const text = activeNote.content || "";
+    const marker = `{{script:${fileName}}}`;
+    const before = text.slice(0, pos);
+    const after = text.slice(pos);
+    const pad = before.length > 0 && !before.endsWith("\n") ? "\n" : "";
+    const padAfter = after.length > 0 && !after.startsWith("\n") ? "\n" : "";
+    const newContent = before + pad + marker + padAfter + after;
+    // 一次性更新 scripts 和 content，避免状态覆盖
+    const updated = notes.map((n) => n.id === activeId ? { ...n, scripts: newScripts, content: newContent, updated_at: Date.now() } : n);
+    setNotes(updated);
+    save(updated.find((n) => n.id === activeId));
     setScriptEditor(null);
   }
 
