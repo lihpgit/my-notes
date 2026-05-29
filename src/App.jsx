@@ -198,9 +198,15 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
 
   // 构建树
-  const { map: treeMap, roots: treeRoots } = useMemo(() => buildTree(notes), [notes]);
-  const currentFolderNote = currentFolder ? notes.find((n) => n.id === currentFolder) : null;
+  const { roots: treeRoots } = useMemo(() => buildTree(notes), [notes]);
   const breadcrumb = currentFolder ? getAncestors(notes, currentFolder) : [];
+
+  // 安全兜底：当前所在文件夹被删除后，自动回到根目录，避免卡在幽灵目录
+  useEffect(() => {
+    if (currentFolder && !notes.some((n) => n.id === currentFolder)) {
+      setCurrentFolder(null);
+    }
+  }, [notes, currentFolder]);
 
   /* ─── 浏览器历史管理（拦截返回键） ─── */
   const skipPopRef = useRef(false);
@@ -235,6 +241,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   }
 
   function navToFolder(fid) {
+    if (search) setSearch(""); // 进入文件夹时清空搜索，否则列表仍显示全局搜索结果
     window.history.pushState({ view: "list", noteId: null, folderId: fid }, "");
     setCurrentFolder(fid);
     setView("list");
@@ -413,13 +420,15 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     const s = (activeNote.scripts || [])[idx];
     const scripts = [...(activeNote.scripts || [])];
     scripts.splice(idx, 1);
-    update("scripts", scripts);
-    // 同时移除正文中该脚本的标记
+    // 同时移除正文中该脚本的标记，一次性更新 scripts 和 content，避免状态覆盖
+    let content = activeNote.content || "";
     if (s) {
       const marker = `{{script:${s.name}}}`;
-      const content = (activeNote.content || "").split(marker).join("").replace(/\n{3,}/g, "\n\n");
-      update("content", content);
+      content = content.split(marker).join("").replace(/\n{3,}/g, "\n\n");
     }
+    const updated = notes.map((n) => n.id === activeId ? { ...n, scripts, content, updated_at: Date.now() } : n);
+    setNotes(updated);
+    save(updated.find((n) => n.id === activeId));
   }
 
   function downloadScript(script) {
