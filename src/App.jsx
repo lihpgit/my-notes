@@ -41,44 +41,39 @@ const readTime = (t) => Math.max(1, Math.ceil((t || "").replace(/[#*`>\-\[\]()!]
 const wordCount = (t) => (t || "").replace(/\s/g, "").length.toLocaleString();
 
 /* ───────── 树形工具 ───────── */
-function buildTree(notes) {
+// 只用「文件夹」构建侧边栏目录树（笔记不进树）
+function buildFolderTree(notes) {
+  const folders = notes.filter((n) => n.is_folder);
+  const folderSet = new Set(folders.map((f) => f.id));
   const map = {};
   const roots = [];
-  notes.forEach((n) => { map[n.id] = { ...n, children: [] }; });
-  notes.forEach((n) => {
-    if (n.parent_id && map[n.parent_id]) {
-      map[n.parent_id].children.push(map[n.id]);
-    } else {
-      roots.push(map[n.id]);
-    }
+  folders.forEach((f) => { map[f.id] = { ...f, children: [] }; });
+  folders.forEach((f) => {
+    const pid = f.parent_id && folderSet.has(f.parent_id) ? f.parent_id : null;
+    if (pid) map[pid].children.push(map[f.id]);
+    else roots.push(map[f.id]);
   });
-  // 每层按 updated_at 降序
-  const sortChildren = (arr) => {
-    arr.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-    arr.forEach((n) => sortChildren(n.children));
+  const sortRec = (arr) => {
+    arr.sort((a, b) => (a.title || "").localeCompare(b.title || "", "zh"));
+    arr.forEach((n) => sortRec(n.children));
   };
-  sortChildren(roots);
-  return { map, roots };
+  sortRec(roots);
+  return roots;
 }
 
-function getAncestors(notes, noteId) {
+// 沿 parent_id 链向上找祖先文件夹（遇到非文件夹即停止）
+function getAncestors(notes, startParentId) {
   const path = [];
-  let cur = noteId;
   const byId = {};
   notes.forEach((n) => { byId[n.id] = n; });
+  let cur = startParentId;
   while (cur) {
     const note = byId[cur];
-    if (!note) break;
+    if (!note || !note.is_folder) break;
     path.unshift(note);
     cur = note.parent_id;
   }
   return path;
-}
-
-function countDescendants(treeNode) {
-  let count = 0;
-  (treeNode.children || []).forEach((c) => { count += 1 + countDescendants(c); });
-  return count;
 }
 
 const LIGHT = {
@@ -192,21 +187,27 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [scriptEditor, setScriptEditor] = useState(null); // {name, ext, content}
   const [currentFolder, setCurrentFolder] = useState(null); // 当前目录 ID，null=根目录
   const [expanded, setExpanded] = useState({}); // 侧边栏树展开状态 {id: true/false}
-  const [moveTarget, setMoveTarget] = useState(null); // 移动文档弹窗 {noteId}
+  const [moveTarget, setMoveTarget] = useState(null); // 移动弹窗 {id}
+  const [folderEditor, setFolderEditor] = useState(null); // 文件夹弹窗 {mode:'create'|'rename', id, parentId, name}
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
 
-  // 构建树
-  const { roots: treeRoots } = useMemo(() => buildTree(notes), [notes]);
+  // 文件夹集合 + 有效父级（父级必须是文件夹，否则视为根目录）
+  const folderSet = useMemo(() => new Set(notes.filter((n) => n.is_folder).map((n) => n.id)), [notes]);
+  const parentOf = (n) => (n.parent_id && folderSet.has(n.parent_id) ? n.parent_id : null);
+
+  // 侧边栏目录树（仅文件夹）
+  const folderTree = useMemo(() => buildFolderTree(notes), [notes]);
   const breadcrumb = currentFolder ? getAncestors(notes, currentFolder) : [];
+  const noteCount = useMemo(() => notes.filter((n) => !n.is_folder).length, [notes]);
 
   // 安全兜底：当前所在文件夹被删除后，自动回到根目录，避免卡在幽灵目录
   useEffect(() => {
-    if (currentFolder && !notes.some((n) => n.id === currentFolder)) {
+    if (currentFolder && !folderSet.has(currentFolder)) {
       setCurrentFolder(null);
     }
-  }, [notes, currentFolder]);
+  }, [folderSet, currentFolder]);
 
   /* ─── 浏览器历史管理（拦截返回键） ─── */
   const skipPopRef = useRef(false);
@@ -267,19 +268,20 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const activeNote = notes.find((n) => n.id === activeId);
 
   const filtered = useMemo(() => {
-    let r = notes;
-    // 搜索时显示全部匹配（不限文件夹）
+    let r;
     if (search) {
-      r = r.filter((n) => (n.title + n.content).toLowerCase().includes(search.toLowerCase()));
+      // 搜索仅匹配笔记正文（不含文件夹），跨目录全局搜索
+      r = notes.filter((n) => !n.is_folder && (n.title + (n.content || "")).toLowerCase().includes(search.toLowerCase()));
     } else {
-      // 非搜索模式：只显示当前文件夹的直接子文档
-      r = r.filter((n) => (n.parent_id || null) === currentFolder);
+      // 非搜索：显示当前文件夹下的直接子项（文件夹 + 笔记）
+      r = notes.filter((n) => (n.parent_id && folderSet.has(n.parent_id) ? n.parent_id : null) === currentFolder);
     }
     if (filterTag) r = r.filter((n) => (n.tags || []).includes(filterTag));
-    // 按更新时间降序
-    r = [...r].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-    return r;
-  }, [notes, filterTag, search, currentFolder]);
+    // 文件夹排前（按名称），笔记排后（按更新时间降序）
+    const fs = r.filter((n) => n.is_folder).sort((a, b) => (a.title || "").localeCompare(b.title || "", "zh"));
+    const ds = r.filter((n) => !n.is_folder).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    return [...fs, ...ds];
+  }, [notes, filterTag, search, currentFolder, folderSet]);
 
   const allTags = useMemo(() => {
     const s = new Set();
@@ -304,42 +306,62 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
 
   async function addNote(parentId) {
     const pid = parentId !== undefined ? parentId : currentFolder;
-    const n = { id: genId(), title: "", content: "", tags: [], scripts: [], parent_id: pid || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
+    const n = { id: genId(), title: "", content: "", tags: [], scripts: [], is_folder: false, parent_id: pid || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
     setNotes((p) => [n, ...p]);
     navPush("edit", n.id);
     await supabase.from("notes").insert(n);
   }
 
   async function deleteNote() {
-    // 检查是否有子文档
-    const childCount = notes.filter((n) => n.parent_id === activeId).length;
-    const msg = childCount > 0
-      ? `此文档下有 ${childCount} 篇子文档，删除后子文档将移到上级目录。确定删除吗？`
-      : "确定删除这篇文章吗？";
-    if (!confirm(msg)) return;
-    // 子文档上移到被删文档的父级
-    const parentOfDeleted = activeNote.parent_id || null;
-    const childNotes = notes.filter((n) => n.parent_id === activeId);
-    for (const c of childNotes) {
-      await supabase.from("notes").update({ parent_id: parentOfDeleted }).eq("id", c.id);
-    }
+    if (!confirm("确定删除这篇文章吗？")) return;
     await supabase.from("notes").delete().eq("id", activeId);
-    setNotes((p) => p.map((n) => n.parent_id === activeId ? { ...n, parent_id: parentOfDeleted } : n).filter((n) => n.id !== activeId));
+    setNotes((p) => p.filter((n) => n.id !== activeId));
     setActiveId(null);
     setView("list");
     window.history.pushState({ view: "list", noteId: null, folderId: currentFolder }, "");
+  }
+
+  /* ─── 文件夹增删改 ─── */
+  async function addFolder(name, parentId) {
+    const pid = parentId !== undefined ? parentId : currentFolder;
+    const f = { id: genId(), title: name.trim(), content: "", tags: [], scripts: [], is_folder: true, parent_id: pid || null, banner: 0, created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
+    setNotes((p) => [f, ...p]);
+    await supabase.from("notes").insert(f);
+  }
+
+  async function renameFolder(id, name) {
+    const updated = notes.map((n) => n.id === id ? { ...n, title: name.trim(), updated_at: Date.now() } : n);
+    setNotes(updated);
+    await supabase.from("notes").update({ title: name.trim(), updated_at: Date.now() }).eq("id", id);
+  }
+
+  // 递归删除文件夹及其全部子内容
+  async function deleteFolder(folderId) {
+    const toDelete = [];
+    const collect = (id) => { toDelete.push(id); notes.filter((n) => n.parent_id === id).forEach((c) => collect(c.id)); };
+    collect(folderId);
+    await supabase.from("notes").delete().in("id", toDelete);
+    setNotes((p) => p.filter((n) => !toDelete.includes(n.id)));
+    // currentFolder 若被删，由兜底 useEffect 自动回根目录
+  }
+
+  function saveFolderEditor() {
+    if (!folderEditor || !folderEditor.name.trim()) return;
+    if (folderEditor.mode === "create") addFolder(folderEditor.name, folderEditor.parentId);
+    else renameFolder(folderEditor.id, folderEditor.name);
+    setFolderEditor(null);
   }
 
   function openNote(nid) { navPush("read", nid); window.scrollTo(0, 0); }
   function backToList() { window.history.back(); }
   function goToEdit(nid) { navPush("edit", nid); }
 
-  /* ─── 移动文档到其他目录 ─── */
+  /* ─── 移动笔记/文件夹到其他目录（目标只能是文件夹或根目录） ─── */
   async function moveNote(noteId, newParentId) {
-    // 不能移动到自己或自己的子孙下
     if (noteId === newParentId) return;
+    // 不能移动到自己的子孙下
     const ancestors = getAncestors(notes, newParentId);
-    if (ancestors.some((a) => a.id === noteId)) { alert("不能移动到自己的子文档下"); return; }
+    if (ancestors.some((a) => a.id === noteId)) { alert("不能移动到自己的子文件夹下"); return; }
     const updated = notes.map((n) => n.id === noteId ? { ...n, parent_id: newParentId || null, updated_at: Date.now() } : n);
     setNotes(updated);
     await supabase.from("notes").update({ parent_id: newParentId || null, updated_at: Date.now() }).eq("id", noteId);
@@ -356,7 +378,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       const m = text.match(/^#\s+(.+)$/m);
       const title = m ? m[1].trim() : file.name.replace(/\.(md|markdown|txt)$/i, "");
       const content = m ? text.replace(/^#\s+.+\n*/, "") : text;
-      newNotes.push({ id: genId(), title, content, tags: [], scripts: [], parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
+      newNotes.push({ id: genId(), title, content, tags: [], scripts: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
     }
     setNotes((p) => [...newNotes, ...p]);
     await supabase.from("notes").insert(newNotes);
@@ -493,12 +515,12 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     </div>
   );
 
-  /* ── 侧边栏树节点递归组件 ── */
+  /* ── 侧边栏目录树节点（仅文件夹） ── */
   function TreeNode({ node, depth = 0 }) {
-    const hasChildren = node.children && node.children.length > 0;
+    const hasSubFolders = node.children && node.children.length > 0;
     const isExpanded = expanded[node.id];
     const isActive = currentFolder === node.id;
-    const childCount = countDescendants(node);
+    const itemCount = notes.filter((n) => parentOf(n) === node.id).length; // 内含直接子项数
     return (
       <>
         <div
@@ -506,20 +528,21 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = T.listHover; }}
           onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
           onClick={() => navToFolder(node.id)}>
-          {hasChildren ? (
+          {hasSubFolders ? (
             <span onClick={(e) => { e.stopPropagation(); setExpanded((p) => ({ ...p, [node.id]: !p[node.id] })); }}
               style={{ width: 16, textAlign: "center", fontSize: 10, flexShrink: 0, color: T.textMuted, userSelect: "none" }}>
               {isExpanded ? "▼" : "▶"}
             </span>
           ) : (
-            <span style={{ width: 16, textAlign: "center", fontSize: 12, flexShrink: 0 }}>📄</span>
+            <span style={{ width: 16, flexShrink: 0 }} />
           )}
+          <span style={{ flexShrink: 0 }}>📁</span>
           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-            {hasChildren ? "📁 " : ""}{node.title || "无标题"}
+            {node.title || "未命名文件夹"}
           </span>
-          {childCount > 0 && <span style={{ fontSize: 10, color: T.textPlaceholder, flexShrink: 0 }}>{childCount}</span>}
+          {itemCount > 0 && <span style={{ fontSize: 10, color: T.textPlaceholder, flexShrink: 0 }}>{itemCount}</span>}
         </div>
-        {hasChildren && isExpanded && node.children.map((c) => <TreeNode key={c.id} node={c} depth={depth + 1} />)}
+        {hasSubFolders && isExpanded && node.children.map((c) => <TreeNode key={c.id} node={c} depth={depth + 1} />)}
       </>
     );
   }
@@ -545,7 +568,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       <div style={{ background: BANNERS[0], padding: "14px 24px", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
         <span style={{ fontSize: 16, fontWeight: 700, textShadow: "0 1px 4px rgba(0,0,0,.15)" }}>我的知识库</span>
         <span style={{ fontSize: 13, opacity: .8 }}>·</span>
-        <span style={{ fontSize: 13, opacity: .8 }}>共 {notes.length} 篇文章 · 记录学习与成长</span>
+        <span style={{ fontSize: 13, opacity: .8 }}>共 {noteCount} 篇文章 · 记录学习与成长</span>
       </div>
 
       <div style={{ padding: "24px 24px 60px", display: "flex", gap: 24 }}>
@@ -562,9 +585,10 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                 onClick={() => navToFolder(null)}>
                 <span style={{ width: 16, textAlign: "center", fontSize: 12 }}>🏠</span>
                 <span>全部文档</span>
-                <span style={{ fontSize: 10, color: T.textPlaceholder, marginLeft: "auto" }}>{notes.length}</span>
+                <span style={{ fontSize: 10, color: T.textPlaceholder, marginLeft: "auto" }}>{noteCount}</span>
               </div>
-              {treeRoots.map((node) => <TreeNode key={node.id} node={node} />)}
+              {folderTree.map((node) => <TreeNode key={node.id} node={node} />)}
+              {folderTree.length === 0 && <p style={{ fontSize: 12, color: T.textTag, padding: "4px 8px" }}>暂无文件夹</p>}
             </div>
           </div>
 
@@ -623,6 +647,10 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                 style={{ width: "100%", padding: "10px 12px 10px 36px", border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, background: T.inputBg, fontFamily: "'Noto Serif SC',serif", color: T.text }} />
             </div>
             <input ref={fileInputRef} type="file" accept=".md,.markdown,.txt" multiple onChange={importMd} style={{ display: "none" }} />
+            <button onClick={() => setFolderEditor({ mode: "create", parentId: currentFolder, name: "" })}
+              style={{ padding: "10px 16px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
+              📁 新建文件夹
+            </button>
             <button onClick={() => fileInputRef.current?.click()}
               style={{ padding: "10px 16px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
               📄 导入
@@ -635,65 +663,77 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
 
           {filtered.length === 0 && (
             <div style={{ textAlign: "center", padding: "60px 0", color: T.textPlaceholder }}>
-              <p style={{ fontSize: 48, marginBottom: 16 }}>📝</p>
-              <p>{search || filterTag ? "没有找到匹配的文章" : currentFolder ? "此目录下暂无文档，点击「写文章」添加" : "还没有文章，点击「写文章」开始创作"}</p>
+              <p style={{ fontSize: 48, marginBottom: 16 }}>{currentFolder ? "📂" : "📝"}</p>
+              <p>{search || filterTag ? "没有找到匹配的文章" : currentFolder ? "此文件夹为空，可「写文章」或「新建文件夹」" : "还没有内容，点击「写文章」或「新建文件夹」开始"}</p>
             </div>
           )}
 
           <div style={{ background: T.card, borderRadius: 10, overflow: "hidden", boxShadow: T.shadow }}>
             {filtered.map((note, i) => {
+              const isFolder = note.is_folder;
               const plain = (note.content || "").replace(/[#*`>\-\[\]()!~_|]/g, "").replace(/\n+/g, " ").trim();
-              const hasChildren = notes.some((n) => n.parent_id === note.id);
-              const childNum = notes.filter((n) => n.parent_id === note.id).length;
+              const itemCount = isFolder ? notes.filter((n) => parentOf(n) === note.id).length : 0;
+              // 递归统计文件夹内全部后代数量（删除确认用）
+              const descCount = isFolder ? (() => { let c = 0; const col = (id) => notes.filter((n) => n.parent_id === id).forEach((n) => { c++; col(n.id); }); col(note.id); return c; })() : 0;
+              const aBtn = { padding: "6px 10px", fontSize: 12, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 };
               return (
                 <div key={note.id} className="card-anim"
                   style={{ display: "flex", alignItems: "center", borderBottom: i < filtered.length - 1 ? `1px solid ${T.borderLight}` : "none", animationDelay: i * .04 + "s", transition: "background .15s" }}
                   onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
                   onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
-                  {/* 文件夹可双击进入 */}
-                  <div onClick={() => hasChildren ? navToFolder(note.id) : openNote(note.id)}
+                  <div onClick={() => isFolder ? navToFolder(note.id) : openNote(note.id)}
                     style={{ flex: 1, display: "flex", alignItems: "center", padding: "12px 18px", cursor: "pointer", minWidth: 0, gap: 12 }}>
                     <div style={{ width: "33%", flexShrink: 0, minWidth: 0 }}>
                       <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 14, flexShrink: 0 }}>{hasChildren ? "📁" : "📄"}</span>
-                        {note.title || "无标题"}
-                        {childNum > 0 && <span style={{ fontSize: 11, color: T.textPlaceholder, fontWeight: 400, flexShrink: 0 }}>({childNum})</span>}
+                        <span style={{ fontSize: 14, flexShrink: 0 }}>{isFolder ? "📁" : "📄"}</span>
+                        {note.title || (isFolder ? "未命名文件夹" : "无标题")}
                       </h3>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", overflow: "hidden", paddingLeft: 20 }}>
-                        {(note.tags || []).map((t) => {
-                          const c = TC[t] || { bg: dark ? "#27272a" : "#f5f5f5", fg: dark ? "#a1a1aa" : "#999" };
-                          return <span key={t} style={{ fontSize: 12, color: c.fg, opacity: .75, whiteSpace: "nowrap" }}>{t}</span>;
-                        })}
-                        {(note.tags || []).length === 0 && <span style={{ fontSize: 12, color: T.textTag }}>无标签</span>}
-                      </div>
+                      {!isFolder && (
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", overflow: "hidden", paddingLeft: 20 }}>
+                          {(note.tags || []).map((t) => {
+                            const c = TC[t] || { bg: dark ? "#27272a" : "#f5f5f5", fg: dark ? "#a1a1aa" : "#999" };
+                            return <span key={t} style={{ fontSize: 12, color: c.fg, opacity: .75, whiteSpace: "nowrap" }}>{t}</span>;
+                          })}
+                          {(note.tags || []).length === 0 && <span style={{ fontSize: 12, color: T.textTag }}>无标签</span>}
+                        </div>
+                      )}
                     </div>
                     <p style={{ flex: 1, fontSize: 13, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                      {plain || "暂无内容"}
+                      {isFolder ? `${itemCount} 个项目` : (plain || "暂无内容")}
                     </p>
                   </div>
                   <div style={{ display: "flex", gap: 4, flexShrink: 0, marginRight: 14, alignItems: "center" }}>
-                    {hasChildren && (
-                      <button onClick={(e) => { e.stopPropagation(); openNote(note.id); }}
-                        style={{ padding: "6px 10px", fontSize: 12, color: T.textMuted, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
+                    {isFolder && (
+                      <button onClick={(e) => { e.stopPropagation(); setFolderEditor({ mode: "rename", id: note.id, name: note.title || "" }); }}
+                        style={{ ...aBtn, color: T.textMuted }}
                         onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
                         onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
-                        阅读
+                        重命名
                       </button>
                     )}
-                    <button onClick={(e) => { e.stopPropagation(); setMoveTarget({ noteId: note.id }); }}
-                      style={{ padding: "6px 10px", fontSize: 12, color: T.textMuted, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
+                    <button onClick={(e) => { e.stopPropagation(); setMoveTarget({ id: note.id }); }}
+                      style={{ ...aBtn, color: T.textMuted }}
                       onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
                       onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
                       移动
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); exportMd(note); }}
-                      style={{ padding: "6px 10px", fontSize: 12, color: T.textMuted, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
-                      onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
-                      导出
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); const cCount = notes.filter((n) => n.parent_id === note.id).length; const msg = cCount > 0 ? `此文档下有 ${cCount} 篇子文档，删除后子文档将移到上级目录。确定删除吗？` : `确定删除「${note.title || "无标题"}」吗？`; if (confirm(msg)) { const pid = note.parent_id || null; const childIds = notes.filter((n) => n.parent_id === note.id); Promise.all(childIds.map((c) => supabase.from("notes").update({ parent_id: pid }).eq("id", c.id))).then(() => supabase.from("notes").delete().eq("id", note.id)).then(() => setNotes((p) => p.map((n) => n.parent_id === note.id ? { ...n, parent_id: pid } : n).filter((n) => n.id !== note.id))); } }}
-                      style={{ padding: "6px 10px", fontSize: 12, color: T.deleteText, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
+                    {!isFolder && (
+                      <button onClick={(e) => { e.stopPropagation(); exportMd(note); }}
+                        style={{ ...aBtn, color: T.textMuted }}
+                        onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
+                        导出
+                      </button>
+                    )}
+                    <button onClick={(e) => {
+                      e.stopPropagation();
+                      if (isFolder) {
+                        if (confirm(descCount > 0 ? `「${note.title || "未命名文件夹"}」内含 ${descCount} 个项目，将一并删除且不可恢复。确定删除吗？` : `确定删除空文件夹「${note.title || "未命名文件夹"}」吗？`)) deleteFolder(note.id);
+                      } else {
+                        if (confirm(`确定删除「${note.title || "无标题"}」吗？`)) supabase.from("notes").delete().eq("id", note.id).then(() => setNotes((p) => p.filter((n) => n.id !== note.id)));
+                      }
+                    }}
+                      style={{ ...aBtn, color: T.deleteText }}
                       onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.deleteBorder; }}
                       onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
                       删除
@@ -706,27 +746,27 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
         </div>
       </div>
 
-      {/* ── 移动文档弹窗 ── */}
+      {/* ── 移动弹窗（目标只能是文件夹或根目录） ── */}
       {moveTarget && (() => {
-        const movingNote = notes.find((n) => n.id === moveTarget.noteId);
+        const movingNote = notes.find((n) => n.id === moveTarget.id);
         if (!movingNote) return null;
-        // 可选目标：根目录 + 所有非自己及非自己后代的文档
+        // 排除自己及自己的全部后代（防止移进自己的子树）
         const selfAndDescendants = new Set();
-        function collectDesc(id) { selfAndDescendants.add(id); notes.filter((n) => n.parent_id === id).forEach((n) => collectDesc(n.id)); }
-        collectDesc(moveTarget.noteId);
-        const targets = notes.filter((n) => !selfAndDescendants.has(n.id));
+        const collectDesc = (id) => { selfAndDescendants.add(id); notes.filter((n) => n.parent_id === id).forEach((n) => collectDesc(n.id)); };
+        collectDesc(moveTarget.id);
+        const targets = notes.filter((n) => n.is_folder && !selfAndDescendants.has(n.id));
         return (
           <div style={{ position: "fixed", inset: 0, zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.5)" }}
             onClick={(e) => { if (e.target === e.currentTarget) setMoveTarget(null); }}>
             <div style={{ width: 400, maxWidth: "90vw", maxHeight: "70vh", background: T.card, borderRadius: 12, boxShadow: T.shadowCard, display: "flex", flexDirection: "column", overflow: "hidden" }}>
               <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text }}>移动「{movingNote.title || "无标题"}」到...</h3>
+                <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text }}>移动「{movingNote.title || (movingNote.is_folder ? "未命名文件夹" : "无标题")}」到...</h3>
                 <button onClick={() => setMoveTarget(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: T.textMuted, lineHeight: 1 }}>×</button>
               </div>
               <div style={{ flex: 1, overflow: "auto", padding: "8px 12px" }}>
-                <div onClick={() => moveNote(moveTarget.noteId, null)}
-                  style={{ padding: "10px 12px", borderRadius: 8, cursor: "pointer", fontSize: 14, color: !movingNote.parent_id ? T.textPlaceholder : T.text, display: "flex", alignItems: "center", gap: 8, transition: "background .12s" }}
-                  onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
+                <div onClick={() => !(!movingNote.parent_id) && moveNote(moveTarget.id, null)}
+                  style={{ padding: "10px 12px", borderRadius: 8, cursor: !movingNote.parent_id ? "default" : "pointer", fontSize: 14, color: !movingNote.parent_id ? T.textPlaceholder : T.text, display: "flex", alignItems: "center", gap: 8, transition: "background .12s" }}
+                  onMouseEnter={(e) => { if (movingNote.parent_id) e.currentTarget.style.background = T.listHover; }}
                   onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
                   🏠 根目录 {!movingNote.parent_id && <span style={{ fontSize: 11, color: T.textPlaceholder }}>(当前)</span>}
                 </div>
@@ -734,19 +774,44 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                   const isCurrent = movingNote.parent_id === t.id;
                   const depth = getAncestors(notes, t.id).length - 1;
                   return (
-                    <div key={t.id} onClick={() => !isCurrent && moveNote(moveTarget.noteId, t.id)}
+                    <div key={t.id} onClick={() => !isCurrent && moveNote(moveTarget.id, t.id)}
                       style={{ padding: "10px 12px", paddingLeft: 12 + depth * 16, borderRadius: 8, cursor: isCurrent ? "default" : "pointer", fontSize: 14, color: isCurrent ? T.textPlaceholder : T.text, display: "flex", alignItems: "center", gap: 8, transition: "background .12s" }}
                       onMouseEnter={(e) => { if (!isCurrent) e.currentTarget.style.background = T.listHover; }}
                       onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
-                      {notes.some((n) => n.parent_id === t.id) ? "📁" : "📄"} {t.title || "无标题"} {isCurrent && <span style={{ fontSize: 11, color: T.textPlaceholder }}>(当前)</span>}
+                      📁 {t.title || "未命名文件夹"} {isCurrent && <span style={{ fontSize: 11, color: T.textPlaceholder }}>(当前)</span>}
                     </div>
                   );
                 })}
+                {targets.length === 0 && <p style={{ fontSize: 13, color: T.textMuted, padding: "12px", textAlign: "center" }}>暂无其他文件夹，可移到根目录或先新建文件夹</p>}
               </div>
             </div>
           </div>
         );
       })()}
+
+      {/* ── 文件夹新建/重命名弹窗 ── */}
+      {folderEditor && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.5)" }}
+          onClick={(e) => { if (e.target === e.currentTarget) setFolderEditor(null); }}>
+          <div style={{ width: 380, maxWidth: "90vw", background: T.card, borderRadius: 12, boxShadow: T.shadowCard, overflow: "hidden" }}>
+            <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.border}` }}>
+              <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text }}>{folderEditor.mode === "create" ? "📁 新建文件夹" : "✏️ 重命名文件夹"}</h3>
+            </div>
+            <div style={{ padding: "20px" }}>
+              <input autoFocus placeholder="文件夹名称" value={folderEditor.name}
+                onChange={(e) => setFolderEditor({ ...folderEditor, name: e.target.value })}
+                onKeyDown={(e) => { if (e.key === "Enter") saveFolderEditor(); if (e.key === "Escape") setFolderEditor(null); }}
+                style={{ width: "100%", padding: "10px 14px", border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, background: T.inputBg, color: T.text, fontFamily: "'Noto Serif SC',serif" }} />
+            </div>
+            <div style={{ padding: "12px 20px", borderTop: `1px solid ${T.border}`, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button onClick={() => setFolderEditor(null)}
+                style={{ padding: "8px 20px", borderRadius: 8, border: `1px solid ${T.borderDashed}`, background: "transparent", color: T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>取消</button>
+              <button onClick={saveFolderEditor} disabled={!folderEditor.name.trim()}
+                style={{ padding: "8px 20px", borderRadius: 8, border: "none", background: T.btnBg, color: T.btnText, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", opacity: !folderEditor.name.trim() ? .4 : 1 }}>确定</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -755,7 +820,6 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   /* ===== 阅读视图 ===== */
   if (view === "read") {
     const readAncestors = getAncestors(notes, activeNote.parent_id);
-    const childNotes = notes.filter((n) => n.parent_id === activeId).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
     return (
     <div style={{ minHeight: "100vh", background: T.bg, fontFamily: "'Noto Serif SC',serif" }}>
       <style>{getCSS(dark)}</style>
@@ -765,7 +829,6 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           <button onClick={backToList} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 返回列表</button>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {themeBtn}
-            <button onClick={() => addNote(activeId)} style={{ padding: "5px 14px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>＋ 子文档</button>
             <button onClick={() => goToEdit(activeId)} style={{ padding: "5px 14px", background: T.btnBg, color: T.btnText, border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>编辑</button>
             <button onClick={deleteNote} style={{ padding: "5px 14px", background: T.deleteBg, color: T.deleteText, border: `1px solid ${T.deleteBorder}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>删除</button>
           </div>
@@ -822,30 +885,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           }}
           dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*暂无内容*", activeNote.scripts) }} />
       </div>
-
-      {/* 子文档列表 */}
-      {childNotes.length > 0 && (
-        <div style={{ padding: "0 24px 80px" }}>
-          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 20 }}>
-            <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
-              📂 子文档 <span style={{ fontSize: 12, fontWeight: 400, color: T.textMuted }}>({childNotes.length})</span>
-            </h3>
-            <div style={{ background: T.card, borderRadius: 10, overflow: "hidden", boxShadow: T.shadow }}>
-              {childNotes.map((cn, i) => (
-                <div key={cn.id} onClick={() => openNote(cn.id)}
-                  style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", cursor: "pointer", borderBottom: i < childNotes.length - 1 ? `1px solid ${T.borderLight}` : "none", transition: "background .12s" }}
-                  onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
-                  onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
-                  <span style={{ fontSize: 13 }}>{notes.some((n) => n.parent_id === cn.id) ? "📁" : "📄"}</span>
-                  <span style={{ fontSize: 14, color: T.text, fontWeight: 500 }}>{cn.title || "无标题"}</span>
-                  <span style={{ fontSize: 12, color: T.textPlaceholder, marginLeft: "auto" }}>{fmtDate(cn.updated_at)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-      {childNotes.length === 0 && <div style={{ height: 60 }} />}
+      <div style={{ height: 60 }} />
     </div>
   );}
 
