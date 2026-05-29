@@ -190,6 +190,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [moveTarget, setMoveTarget] = useState(null); // 移动弹窗 {id}
   const [folderEditor, setFolderEditor] = useState(null); // 文件夹弹窗 {mode:'create'|'rename', id, parentId, name}
   const [narrow, setNarrow] = useState(typeof window !== "undefined" && window.innerWidth < 768);
+  const [uploadingAtt, setUploadingAtt] = useState(false); // 附件上传中
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
@@ -314,7 +315,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
 
   async function addNote(parentId) {
     const pid = parentId !== undefined ? parentId : currentFolder;
-    const n = { id: genId(), title: "", content: "", tags: [], scripts: [], is_folder: false, parent_id: pid || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
+    const n = { id: genId(), title: "", content: "", tags: [], scripts: [], attachments: [], is_folder: false, parent_id: pid || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
     setNotes((p) => [n, ...p]);
     navPush("edit", n.id);
     await supabase.from("notes").insert(n);
@@ -322,7 +323,9 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
 
   async function deleteNote() {
     if (!confirm("确定删除这篇文章吗？")) return;
+    const paths = (activeNote.attachments || []).map((a) => a.path).filter(Boolean);
     await supabase.from("notes").delete().eq("id", activeId);
+    if (paths.length) await supabase.storage.from("attachments").remove(paths);
     setNotes((p) => p.filter((n) => n.id !== activeId));
     setActiveId(null);
     setView("list");
@@ -332,7 +335,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   /* ─── 文件夹增删改 ─── */
   async function addFolder(name, parentId) {
     const pid = parentId !== undefined ? parentId : currentFolder;
-    const f = { id: genId(), title: name.trim(), content: "", tags: [], scripts: [], is_folder: true, parent_id: pid || null, banner: 0, created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
+    const f = { id: genId(), title: name.trim(), content: "", tags: [], scripts: [], attachments: [], is_folder: true, parent_id: pid || null, banner: 0, created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
     setNotes((p) => [f, ...p]);
     await supabase.from("notes").insert(f);
   }
@@ -348,7 +351,10 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     const toDelete = [];
     const collect = (id) => { toDelete.push(id); notes.filter((n) => n.parent_id === id).forEach((c) => collect(c.id)); };
     collect(folderId);
+    // 收集被删笔记的附件，一并从 Storage 清理
+    const paths = notes.filter((n) => toDelete.includes(n.id)).flatMap((n) => (n.attachments || []).map((a) => a.path)).filter(Boolean);
     await supabase.from("notes").delete().in("id", toDelete);
+    if (paths.length) await supabase.storage.from("attachments").remove(paths);
     setNotes((p) => p.filter((n) => !toDelete.includes(n.id)));
     // currentFolder 若被删，由兜底 useEffect 自动回根目录
   }
@@ -386,7 +392,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       const m = text.match(/^#\s+(.+)$/m);
       const title = m ? m[1].trim() : file.name.replace(/\.(md|markdown|txt)$/i, "");
       const content = m ? text.replace(/^#\s+.+\n*/, "") : text;
-      newNotes.push({ id: genId(), title, content, tags: [], scripts: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
+      newNotes.push({ id: genId(), title, content, tags: [], scripts: [], attachments: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
     }
     setNotes((p) => [...newNotes, ...p]);
     await supabase.from("notes").insert(newNotes);
@@ -411,6 +417,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   /* ─── 脚本管理 ─── */
   const scriptInputRef = useRef(null);
   const textareaRef = useRef(null);
+  const attInputRef = useRef(null);
 
   async function addScripts(e) {
     const files = Array.from(e.target.files || []);
@@ -471,6 +478,84 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     URL.revokeObjectURL(url);
   }
 
+  /* ─── 附件管理（Supabase Storage） ─── */
+  const ATT_BUCKET = "attachments";
+  const MAX_ATT_SIZE = 20 * 1024 * 1024; // 20MB
+
+  // 上传附件到 Storage，并在光标处插入 {{file:名字}} 标记
+  async function addAttachments(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (files.length === 0) return;
+    const oversize = files.find((f) => f.size > MAX_ATT_SIZE);
+    if (oversize) { alert(`文件「${oversize.name}」超过 20MB，请压缩后再上传`); return; }
+    setUploadingAtt(true);
+    const newAtts = [];
+    try {
+      for (const f of files) {
+        const ext = f.name.includes(".") ? "." + f.name.split(".").pop() : "";
+        const path = `${user.id}/${genId()}${ext}`;
+        const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, f, { contentType: f.type || "application/octet-stream", upsert: false });
+        if (error) { alert(`上传「${f.name}」失败：${error.message}`); continue; }
+        const url = supabase.storage.from(ATT_BUCKET).getPublicUrl(path).data.publicUrl;
+        newAtts.push({ name: f.name, type: f.type || "", path, url });
+      }
+    } finally {
+      setUploadingAtt(false);
+    }
+    if (newAtts.length === 0) return;
+    // 上传是异步网络操作，期间用户可能继续打字。用函数式更新读取最新 content，
+    // 避免用 closure 里的旧 content 覆盖用户在上传期间输入的内容。
+    const ta = textareaRef.current;
+    const pos = ta ? (ta.selectionStart || 0) : null;
+    const markers = newAtts.map((a) => `{{file:${a.name}}}`).join("\n");
+    let savedNote = null;
+    setNotes((prev) => prev.map((n) => {
+      if (n.id !== activeId) return n;
+      const text = n.content || "";
+      const p = pos == null ? text.length : Math.min(pos, text.length);
+      const before = text.slice(0, p);
+      const after = text.slice(p);
+      const pad = before.length > 0 && !before.endsWith("\n") ? "\n" : "";
+      const padAfter = after.length > 0 && !after.startsWith("\n") ? "\n" : "";
+      savedNote = { ...n, attachments: [...(n.attachments || []), ...newAtts], content: before + pad + markers + padAfter + after, updated_at: Date.now() };
+      return savedNote;
+    }));
+    if (savedNote) save(savedNote);
+  }
+
+  // 移除附件：删 chip + 删正文标记 + 从 Storage 删文件
+  async function removeAttachment(idx) {
+    const a = (activeNote.attachments || [])[idx];
+    const atts = [...(activeNote.attachments || [])];
+    atts.splice(idx, 1);
+    let content = activeNote.content || "";
+    if (a) {
+      const marker = `{{file:${a.name}}}`;
+      content = content.split(marker).join("").replace(/\n{3,}/g, "\n\n");
+    }
+    const updated = notes.map((n) => n.id === activeId ? { ...n, attachments: atts, content, updated_at: Date.now() } : n);
+    setNotes(updated);
+    save(updated.find((n) => n.id === activeId));
+    if (a && a.path) await supabase.storage.from(ATT_BUCKET).remove([a.path]);
+  }
+
+  // 下载附件：拉取为 blob 后按原文件名保存（跨域 download 属性无效，故走 blob）
+  async function downloadAttachment(att) {
+    try {
+      const res = await fetch(att.url);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = att.name;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      window.open(att.url, "_blank");
+    }
+  }
+
   /* ─── 手动创建脚本 ─── */
   function saveManualScript() {
     if (!scriptEditor || !scriptEditor.name.trim() || !scriptEditor.content.trim()) return;
@@ -494,18 +579,29 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     setScriptEditor(null);
   }
 
-  /* 渲染正文：将 {{script:xxx}} 替换为可点击的脚本链接 */
-  function renderContent(content, scripts) {
-    const html = marked.parse(content || "*暂无内容*");
-    // 替换 {{script:name}} 为高亮下载链接
-    return html.replace(/\{\{script:(.+?)\}\}/g, (_, name) => {
+  /* 渲染正文：将 {{script:xxx}} / {{file:xxx}} 替换为脚本链接 / 附件（图片内联，其他为下载链接） */
+  function renderContent(content, scripts, attachments) {
+    let html = marked.parse(content || "*暂无内容*");
+    const bg = dark ? "#1e293b" : "#eef2ff";
+    const border = dark ? "#334155" : "#c7d2fe";
+    const color = dark ? "#60a5fa" : "#4338ca";
+    // 脚本标记
+    html = html.replace(/\{\{script:(.+?)\}\}/g, (_, name) => {
       const s = (scripts || []).find(x => x.name === name);
       if (!s) return `<span style="color:#999;font-size:13px">⚠️ 脚本未找到: ${name}</span>`;
-      const bg = dark ? "#1e293b" : "#eef2ff";
-      const border = dark ? "#334155" : "#c7d2fe";
-      const color = dark ? "#60a5fa" : "#4338ca";
       return `<span class="script-link" data-script="${name}" style="display:inline-flex;align-items:center;gap:5px;padding:4px 14px;border-radius:8px;background:${bg};border:1px solid ${border};cursor:pointer;font-size:13px;color:${color};font-family:'Noto Serif SC',serif;transition:opacity .15s" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">📎 ${name} <span style="font-size:11px;opacity:.7">↓点击下载</span></span>`;
     });
+    // 附件标记
+    html = html.replace(/\{\{file:(.+?)\}\}/g, (_, name) => {
+      const a = (attachments || []).find(x => x.name === name);
+      if (!a) return `<span style="color:#999;font-size:13px">⚠️ 附件未找到: ${name}</span>`;
+      const isImg = (a.type || "").startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(a.name);
+      if (isImg) {
+        return `<span class="att-img" data-att="${name}" style="display:block;margin:10px 0"><img src="${a.url}" alt="${name}" style="max-width:100%;border-radius:8px;cursor:zoom-in;display:block" /><span style="font-size:12px;color:${dark ? "#71717a" : "#999"}">🖼 ${name} · 点击看大图</span></span>`;
+      }
+      return `<span class="att-link" data-att="${name}" style="display:inline-flex;align-items:center;gap:5px;padding:4px 14px;border-radius:8px;background:${bg};border:1px solid ${border};cursor:pointer;font-size:13px;color:${color};font-family:'Noto Serif SC',serif;transition:opacity .15s" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">📎 ${name} <span style="font-size:11px;opacity:.7">↓点击下载</span></span>`;
+    });
+    return html;
   }
 
   const themeBtn = (
@@ -887,14 +983,14 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       <div style={{ padding: "28px 24px 20px" }}>
         <div className="article-body"
           onClick={(e) => {
-            const el = e.target.closest(".script-link");
-            if (el) {
-              const name = el.getAttribute("data-script");
-              const s = (activeNote.scripts || []).find(x => x.name === name);
-              if (s) downloadScript(s);
-            }
+            const sl = e.target.closest(".script-link");
+            if (sl) { const s = (activeNote.scripts || []).find(x => x.name === sl.getAttribute("data-script")); if (s) downloadScript(s); return; }
+            const al = e.target.closest(".att-link");
+            if (al) { const a = (activeNote.attachments || []).find(x => x.name === al.getAttribute("data-att")); if (a) downloadAttachment(a); return; }
+            const ai = e.target.closest(".att-img");
+            if (ai) { const a = (activeNote.attachments || []).find(x => x.name === ai.getAttribute("data-att")); if (a) window.open(a.url, "_blank"); }
           }}
-          dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*暂无内容*", activeNote.scripts) }} />
+          dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*暂无内容*", activeNote.scripts, activeNote.attachments) }} />
       </div>
       <div style={{ height: 60 }} />
     </div>
@@ -973,6 +1069,25 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           </button>
         </div>
 
+        <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 13, color: T.textMuted }}>附件：</span>
+          {(activeNote.attachments || []).map((a, idx) => {
+            const isImg = (a.type || "").startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(a.name);
+            return (
+              <span key={idx} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 12px", borderRadius: 14, background: dark ? "#1e293b" : "#eef2ff", border: `1px solid ${dark ? "#334155" : "#c7d2fe"}`, fontSize: 12 }}>
+                <span style={{ color: dark ? "#93c5fd" : "#4338ca" }}>{isImg ? "🖼" : "📎"} {a.name}</span>
+                <button onClick={() => downloadAttachment(a)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: dark ? "#60a5fa" : "#6366f1", padding: 0, fontFamily: "'Noto Serif SC',serif" }}>下载</button>
+                <button onClick={() => removeAttachment(idx)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.deleteText, padding: 0, lineHeight: 1 }}>×</button>
+              </span>
+            );
+          })}
+          <input ref={attInputRef} type="file" multiple onChange={addAttachments} style={{ display: "none" }} />
+          <button onClick={() => attInputRef.current?.click()} disabled={uploadingAtt}
+            style={{ padding: "4px 12px", borderRadius: 14, border: `1px dashed ${T.borderDashed}`, background: "transparent", color: T.textMuted, fontSize: 12, cursor: uploadingAtt ? "wait" : "pointer", fontFamily: "'Noto Serif SC',serif", opacity: uploadingAtt ? .6 : 1 }}>
+            {uploadingAtt ? "上传中..." : "📎 添加附件"}
+          </button>
+        </div>
+
         {scriptEditor && (
           <div style={{ position: "fixed", inset: 0, zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.5)" }}
             onClick={(e) => { if (e.target === e.currentTarget) setScriptEditor(null); }}>
@@ -1034,8 +1149,15 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           <div style={{ display: "flex", flexDirection: "column" }}>
             <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8 }}>实时预览</div>
             <div style={{ flex: 1, border: `1px solid ${T.borderInput}`, borderRadius: 10, padding: "16px 18px", background: T.editorBg, overflowY: "auto" }}
-              onClick={(e) => { const el = e.target.closest(".script-link"); if (el) { const name = el.getAttribute("data-script"); const s = (activeNote.scripts || []).find(x => x.name === name); if (s) downloadScript(s); } }}>
-              <div className="article-body" dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*开始写作后这里会显示预览...*", activeNote.scripts) }} />
+              onClick={(e) => {
+                const sl = e.target.closest(".script-link");
+                if (sl) { const s = (activeNote.scripts || []).find(x => x.name === sl.getAttribute("data-script")); if (s) downloadScript(s); return; }
+                const al = e.target.closest(".att-link");
+                if (al) { const a = (activeNote.attachments || []).find(x => x.name === al.getAttribute("data-att")); if (a) downloadAttachment(a); return; }
+                const ai = e.target.closest(".att-img");
+                if (ai) { const a = (activeNote.attachments || []).find(x => x.name === ai.getAttribute("data-att")); if (a) window.open(a.url, "_blank"); }
+              }}>
+              <div className="article-body" dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*开始写作后这里会显示预览...*", activeNote.scripts, activeNote.attachments) }} />
             </div>
           </div>
         </div>
