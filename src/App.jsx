@@ -40,6 +40,47 @@ const fmtDate = (ts) => new Date(ts).toLocaleDateString("zh-CN", { year: "numeri
 const readTime = (t) => Math.max(1, Math.ceil((t || "").replace(/[#*`>\-\[\]()!]/g, "").length / 400)) + " min";
 const wordCount = (t) => (t || "").replace(/\s/g, "").length.toLocaleString();
 
+/* ───────── 树形工具 ───────── */
+function buildTree(notes) {
+  const map = {};
+  const roots = [];
+  notes.forEach((n) => { map[n.id] = { ...n, children: [] }; });
+  notes.forEach((n) => {
+    if (n.parent_id && map[n.parent_id]) {
+      map[n.parent_id].children.push(map[n.id]);
+    } else {
+      roots.push(map[n.id]);
+    }
+  });
+  // 每层按 updated_at 降序
+  const sortChildren = (arr) => {
+    arr.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    arr.forEach((n) => sortChildren(n.children));
+  };
+  sortChildren(roots);
+  return { map, roots };
+}
+
+function getAncestors(notes, noteId) {
+  const path = [];
+  let cur = noteId;
+  const byId = {};
+  notes.forEach((n) => { byId[n.id] = n; });
+  while (cur) {
+    const note = byId[cur];
+    if (!note) break;
+    path.unshift(note);
+    cur = note.parent_id;
+  }
+  return path;
+}
+
+function countDescendants(treeNode) {
+  let count = 0;
+  (treeNode.children || []).forEach((c) => { count += 1 + countDescendants(c); });
+  return count;
+}
+
 const LIGHT = {
   bg: "#f8f9fa", card: "#fff", text: "#1a1a1a", textSub: "#666", textMuted: "#999", textFaint: "#aaa", textPlaceholder: "#bbb", textTag: "#ccc",
   border: "#eee", borderLight: "#f0f0f0", borderInput: "#e0e0e0", borderDashed: "#ddd",
@@ -149,16 +190,23 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [scriptEditor, setScriptEditor] = useState(null); // {name, ext, content}
+  const [currentFolder, setCurrentFolder] = useState(null); // 当前目录 ID，null=根目录
+  const [expanded, setExpanded] = useState({}); // 侧边栏树展开状态 {id: true/false}
+  const [moveTarget, setMoveTarget] = useState(null); // 移动文档弹窗 {noteId}
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
+
+  // 构建树
+  const { map: treeMap, roots: treeRoots } = useMemo(() => buildTree(notes), [notes]);
+  const currentFolderNote = currentFolder ? notes.find((n) => n.id === currentFolder) : null;
+  const breadcrumb = currentFolder ? getAncestors(notes, currentFolder) : [];
 
   /* ─── 浏览器历史管理（拦截返回键） ─── */
   const skipPopRef = useRef(false);
 
   useEffect(() => {
-    // 初始化：替换当前状态为 list
-    window.history.replaceState({ view: "list", noteId: null }, "");
+    window.history.replaceState({ view: "list", noteId: null, folderId: null }, "");
   }, []);
 
   useEffect(() => {
@@ -168,20 +216,36 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       if (st) {
         setView(st.view || "list");
         setActiveId(st.noteId || null);
+        if (st.folderId !== undefined) setCurrentFolder(st.folderId || null);
         if (st.view !== "list") window.scrollTo(0, 0);
       } else {
         setView("list");
         setActiveId(null);
+        setCurrentFolder(null);
       }
     }
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  function navPush(v, nid) {
-    window.history.pushState({ view: v, noteId: nid || null }, "");
+  function navPush(v, nid, fid) {
+    window.history.pushState({ view: v, noteId: nid || null, folderId: fid !== undefined ? fid : currentFolder }, "");
     setView(v);
     setActiveId(nid || null);
+  }
+
+  function navToFolder(fid) {
+    window.history.pushState({ view: "list", noteId: null, folderId: fid }, "");
+    setCurrentFolder(fid);
+    setView("list");
+    setActiveId(null);
+    // 自动展开目标文件夹的父链
+    if (fid) {
+      const path = getAncestors(notes, fid);
+      const exp = { ...expanded };
+      path.forEach((n) => { exp[n.id] = true; });
+      setExpanded(exp);
+    }
   }
 
   useEffect(() => { loadNotes(); }, []);
@@ -197,10 +261,18 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
 
   const filtered = useMemo(() => {
     let r = notes;
+    // 搜索时显示全部匹配（不限文件夹）
+    if (search) {
+      r = r.filter((n) => (n.title + n.content).toLowerCase().includes(search.toLowerCase()));
+    } else {
+      // 非搜索模式：只显示当前文件夹的直接子文档
+      r = r.filter((n) => (n.parent_id || null) === currentFolder);
+    }
     if (filterTag) r = r.filter((n) => (n.tags || []).includes(filterTag));
-    if (search) r = r.filter((n) => (n.title + n.content).toLowerCase().includes(search.toLowerCase()));
+    // 按更新时间降序
+    r = [...r].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
     return r;
-  }, [notes, filterTag, search]);
+  }, [notes, filterTag, search, currentFolder]);
 
   const allTags = useMemo(() => {
     const s = new Set();
@@ -223,26 +295,49 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     save(updated.find((n) => n.id === activeId));
   }
 
-  async function addNote() {
-    const n = { id: genId(), title: "", content: "", tags: [], scripts: [], banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
+  async function addNote(parentId) {
+    const pid = parentId !== undefined ? parentId : currentFolder;
+    const n = { id: genId(), title: "", content: "", tags: [], scripts: [], parent_id: pid || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
     setNotes((p) => [n, ...p]);
     navPush("edit", n.id);
     await supabase.from("notes").insert(n);
   }
 
   async function deleteNote() {
-    if (!confirm("确定删除这篇文章吗？")) return;
+    // 检查是否有子文档
+    const childCount = notes.filter((n) => n.parent_id === activeId).length;
+    const msg = childCount > 0
+      ? `此文档下有 ${childCount} 篇子文档，删除后子文档将移到上级目录。确定删除吗？`
+      : "确定删除这篇文章吗？";
+    if (!confirm(msg)) return;
+    // 子文档上移到被删文档的父级
+    const parentOfDeleted = activeNote.parent_id || null;
+    const childNotes = notes.filter((n) => n.parent_id === activeId);
+    for (const c of childNotes) {
+      await supabase.from("notes").update({ parent_id: parentOfDeleted }).eq("id", c.id);
+    }
     await supabase.from("notes").delete().eq("id", activeId);
-    setNotes((p) => p.filter((n) => n.id !== activeId));
+    setNotes((p) => p.map((n) => n.parent_id === activeId ? { ...n, parent_id: parentOfDeleted } : n).filter((n) => n.id !== activeId));
     setActiveId(null);
     setView("list");
-    // 删除后回到列表，清理历史栈到 list
-    window.history.pushState({ view: "list", noteId: null }, "");
+    window.history.pushState({ view: "list", noteId: null, folderId: currentFolder }, "");
   }
 
   function openNote(nid) { navPush("read", nid); window.scrollTo(0, 0); }
   function backToList() { window.history.back(); }
   function goToEdit(nid) { navPush("edit", nid); }
+
+  /* ─── 移动文档到其他目录 ─── */
+  async function moveNote(noteId, newParentId) {
+    // 不能移动到自己或自己的子孙下
+    if (noteId === newParentId) return;
+    const ancestors = getAncestors(notes, newParentId);
+    if (ancestors.some((a) => a.id === noteId)) { alert("不能移动到自己的子文档下"); return; }
+    const updated = notes.map((n) => n.id === noteId ? { ...n, parent_id: newParentId || null, updated_at: Date.now() } : n);
+    setNotes(updated);
+    await supabase.from("notes").update({ parent_id: newParentId || null, updated_at: Date.now() }).eq("id", noteId);
+    setMoveTarget(null);
+  }
 
   /* ─── 导入 .md 文件（支持批量） ─── */
   async function importMd(e) {
@@ -254,7 +349,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       const m = text.match(/^#\s+(.+)$/m);
       const title = m ? m[1].trim() : file.name.replace(/\.(md|markdown|txt)$/i, "");
       const content = m ? text.replace(/^#\s+.+\n*/, "") : text;
-      newNotes.push({ id: genId(), title, content, tags: [], banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
+      newNotes.push({ id: genId(), title, content, tags: [], scripts: [], parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
     }
     setNotes((p) => [...newNotes, ...p]);
     await supabase.from("notes").insert(newNotes);
@@ -389,6 +484,37 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     </div>
   );
 
+  /* ── 侧边栏树节点递归组件 ── */
+  function TreeNode({ node, depth = 0 }) {
+    const hasChildren = node.children && node.children.length > 0;
+    const isExpanded = expanded[node.id];
+    const isActive = currentFolder === node.id;
+    const childCount = countDescendants(node);
+    return (
+      <>
+        <div
+          style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 8px", paddingLeft: 8 + depth * 14, borderRadius: 6, cursor: "pointer", background: isActive ? T.activeFilter : "transparent", transition: "background .12s", fontSize: 13, color: isActive ? T.text : T.textSub, fontWeight: isActive ? 600 : 400, minWidth: 0 }}
+          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = T.listHover; }}
+          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+          onClick={() => navToFolder(node.id)}>
+          {hasChildren ? (
+            <span onClick={(e) => { e.stopPropagation(); setExpanded((p) => ({ ...p, [node.id]: !p[node.id] })); }}
+              style={{ width: 16, textAlign: "center", fontSize: 10, flexShrink: 0, color: T.textMuted, userSelect: "none" }}>
+              {isExpanded ? "▼" : "▶"}
+            </span>
+          ) : (
+            <span style={{ width: 16, textAlign: "center", fontSize: 12, flexShrink: 0 }}>📄</span>
+          )}
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+            {hasChildren ? "📁 " : ""}{node.title || "无标题"}
+          </span>
+          {childCount > 0 && <span style={{ fontSize: 10, color: T.textPlaceholder, flexShrink: 0 }}>{childCount}</span>}
+        </div>
+        {hasChildren && isExpanded && node.children.map((c) => <TreeNode key={c.id} node={c} depth={depth + 1} />)}
+      </>
+    );
+  }
+
   /* ===== 列表视图 ===== */
   if (view === "list") return (
     <div style={{ minHeight: "100vh", background: T.bg, fontFamily: "'Noto Serif SC',serif" }}>
@@ -414,12 +540,31 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       </div>
 
       <div style={{ padding: "24px 24px 60px", display: "flex", gap: 24 }}>
-        <aside style={{ width: 180, flexShrink: 0, position: "sticky", top: 80, alignSelf: "flex-start" }}>
-          <div style={{ background: T.sidebarBg, borderRadius: 10, padding: "16px", boxShadow: T.shadow }}>
-            <h4 style={{ fontSize: 13, fontWeight: 600, color: T.textMuted, marginBottom: 12 }}>标签</h4>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {/* ── 左侧：文档目录树 + 标签 ── */}
+        <aside style={{ width: 220, flexShrink: 0, position: "sticky", top: 80, alignSelf: "flex-start", display: "flex", flexDirection: "column", gap: 16, maxHeight: "calc(100vh - 100px)", overflow: "auto" }}>
+          {/* 目录树 */}
+          <div style={{ background: T.sidebarBg, borderRadius: 10, padding: "12px", boxShadow: T.shadow }}>
+            <h4 style={{ fontSize: 13, fontWeight: 600, color: T.textMuted, marginBottom: 8, padding: "0 4px" }}>📂 文档目录</h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              <div
+                style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 8px", borderRadius: 6, cursor: "pointer", background: !currentFolder ? T.activeFilter : "transparent", fontSize: 13, color: !currentFolder ? T.text : T.textSub, fontWeight: !currentFolder ? 600 : 400, transition: "background .12s" }}
+                onMouseEnter={(e) => { if (currentFolder) e.currentTarget.style.background = T.listHover; }}
+                onMouseLeave={(e) => { if (currentFolder) e.currentTarget.style.background = "transparent"; }}
+                onClick={() => navToFolder(null)}>
+                <span style={{ width: 16, textAlign: "center", fontSize: 12 }}>🏠</span>
+                <span>全部文档</span>
+                <span style={{ fontSize: 10, color: T.textPlaceholder, marginLeft: "auto" }}>{notes.length}</span>
+              </div>
+              {treeRoots.map((node) => <TreeNode key={node.id} node={node} />)}
+            </div>
+          </div>
+
+          {/* 标签过滤 */}
+          <div style={{ background: T.sidebarBg, borderRadius: 10, padding: "12px", boxShadow: T.shadow }}>
+            <h4 style={{ fontSize: 13, fontWeight: 600, color: T.textMuted, marginBottom: 8, padding: "0 4px" }}>🏷️ 标签</h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <button onClick={() => setFilterTag(null)}
-                style={{ textAlign: "left", padding: "6px 10px", borderRadius: 6, border: "none", background: !filterTag ? T.activeFilter : "transparent", color: !filterTag ? T.text : T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: !filterTag ? 600 : 400 }}>
+                style={{ textAlign: "left", padding: "5px 8px", borderRadius: 6, border: "none", background: !filterTag ? T.activeFilter : "transparent", color: !filterTag ? T.text : T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: !filterTag ? 600 : 400 }}>
                 全部 <span style={{ fontSize: 11, color: T.textPlaceholder, marginLeft: 4 }}>{notes.length}</span>
               </button>
               {allTags.map((t) => {
@@ -427,21 +572,45 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                 const count = notes.filter((n) => (n.tags || []).includes(t)).length;
                 return (
                   <button key={t} onClick={() => setFilterTag(filterTag === t ? null : t)}
-                    style={{ textAlign: "left", padding: "6px 10px", borderRadius: 6, border: "none", background: filterTag === t ? c.bg : "transparent", color: filterTag === t ? c.fg : T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: filterTag === t ? 600 : 400 }}>
+                    style={{ textAlign: "left", padding: "5px 8px", borderRadius: 6, border: "none", background: filterTag === t ? c.bg : "transparent", color: filterTag === t ? c.fg : T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: filterTag === t ? 600 : 400 }}>
                     {t} <span style={{ fontSize: 11, color: T.textPlaceholder, marginLeft: 4 }}>{count}</span>
                   </button>
                 );
               })}
-              {allTags.length === 0 && <p style={{ fontSize: 12, color: T.textTag, padding: "4px 10px" }}>暂无标签</p>}
+              {allTags.length === 0 && <p style={{ fontSize: 12, color: T.textTag, padding: "4px 8px" }}>暂无标签</p>}
             </div>
           </div>
         </aside>
 
+        {/* ── 右侧：面包屑 + 文档列表 ── */}
         <div style={{ flex: 1, minWidth: 0 }}>
+          {/* 面包屑导航 */}
+          {(currentFolder || search) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 16, fontSize: 13, color: T.textMuted, flexWrap: "wrap" }}>
+              {search ? (
+                <span>🔍 搜索结果：{filtered.length} 篇</span>
+              ) : (
+                <>
+                  <span onClick={() => navToFolder(null)} style={{ cursor: "pointer", color: T.textSub, textDecoration: "underline" }}>🏠 根目录</span>
+                  {breadcrumb.map((b, i) => (
+                    <span key={b.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ color: T.textPlaceholder }}>/</span>
+                      {i < breadcrumb.length - 1 ? (
+                        <span onClick={() => navToFolder(b.id)} style={{ cursor: "pointer", color: T.textSub, textDecoration: "underline" }}>{b.title || "无标题"}</span>
+                      ) : (
+                        <span style={{ color: T.text, fontWeight: 600 }}>{b.title || "无标题"}</span>
+                      )}
+                    </span>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
             <div style={{ flex: 1, minWidth: 200, position: "relative" }}>
               <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textFaint }}>🔍</span>
-              <input placeholder="搜索文章..." value={search} onChange={(e) => setSearch(e.target.value)}
+              <input placeholder="搜索全部文章..." value={search} onChange={(e) => setSearch(e.target.value)}
                 style={{ width: "100%", padding: "10px 12px 10px 36px", border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, background: T.inputBg, fontFamily: "'Noto Serif SC',serif", color: T.text }} />
             </div>
             <input ref={fileInputRef} type="file" accept=".md,.markdown,.txt" multiple onChange={importMd} style={{ display: "none" }} />
@@ -449,7 +618,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
               style={{ padding: "10px 16px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
               📄 导入
             </button>
-            <button onClick={addNote}
+            <button onClick={() => addNote()}
               style={{ padding: "10px 20px", background: T.btnBg, color: T.btnText, border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
               ＋ 写文章
             </button>
@@ -458,24 +627,30 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           {filtered.length === 0 && (
             <div style={{ textAlign: "center", padding: "60px 0", color: T.textPlaceholder }}>
               <p style={{ fontSize: 48, marginBottom: 16 }}>📝</p>
-              <p>{search || filterTag ? "没有找到匹配的文章" : "还没有文章，点击「写文章」开始创作"}</p>
+              <p>{search || filterTag ? "没有找到匹配的文章" : currentFolder ? "此目录下暂无文档，点击「写文章」添加" : "还没有文章，点击「写文章」开始创作"}</p>
             </div>
           )}
 
           <div style={{ background: T.card, borderRadius: 10, overflow: "hidden", boxShadow: T.shadow }}>
             {filtered.map((note, i) => {
               const plain = (note.content || "").replace(/[#*`>\-\[\]()!~_|]/g, "").replace(/\n+/g, " ").trim();
+              const hasChildren = notes.some((n) => n.parent_id === note.id);
+              const childNum = notes.filter((n) => n.parent_id === note.id).length;
               return (
                 <div key={note.id} className="card-anim"
                   style={{ display: "flex", alignItems: "center", borderBottom: i < filtered.length - 1 ? `1px solid ${T.borderLight}` : "none", animationDelay: i * .04 + "s", transition: "background .15s" }}
                   onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
                   onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
-                  <div onClick={() => openNote(note.id)} style={{ flex: 1, display: "flex", alignItems: "center", padding: "12px 18px", cursor: "pointer", minWidth: 0, gap: 12 }}>
+                  {/* 文件夹可双击进入 */}
+                  <div onClick={() => hasChildren ? navToFolder(note.id) : openNote(note.id)}
+                    style={{ flex: 1, display: "flex", alignItems: "center", padding: "12px 18px", cursor: "pointer", minWidth: 0, gap: 12 }}>
                     <div style={{ width: "33%", flexShrink: 0, minWidth: 0 }}>
-                      <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>
+                      <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2, display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 14, flexShrink: 0 }}>{hasChildren ? "📁" : "📄"}</span>
                         {note.title || "无标题"}
+                        {childNum > 0 && <span style={{ fontSize: 11, color: T.textPlaceholder, fontWeight: 400, flexShrink: 0 }}>({childNum})</span>}
                       </h3>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", overflow: "hidden" }}>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", overflow: "hidden", paddingLeft: 20 }}>
                         {(note.tags || []).map((t) => {
                           const c = TC[t] || { bg: dark ? "#27272a" : "#f5f5f5", fg: dark ? "#a1a1aa" : "#999" };
                           return <span key={t} style={{ fontSize: 12, color: c.fg, opacity: .75, whiteSpace: "nowrap" }}>{t}</span>;
@@ -487,14 +662,28 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                       {plain || "暂无内容"}
                     </p>
                   </div>
-                  <div style={{ display: "flex", gap: 4, flexShrink: 0, marginRight: 14 }}>
+                  <div style={{ display: "flex", gap: 4, flexShrink: 0, marginRight: 14, alignItems: "center" }}>
+                    {hasChildren && (
+                      <button onClick={(e) => { e.stopPropagation(); openNote(note.id); }}
+                        style={{ padding: "6px 10px", fontSize: 12, color: T.textMuted, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
+                        onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
+                        阅读
+                      </button>
+                    )}
+                    <button onClick={(e) => { e.stopPropagation(); setMoveTarget({ noteId: note.id }); }}
+                      style={{ padding: "6px 10px", fontSize: 12, color: T.textMuted, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
+                      onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
+                      移动
+                    </button>
                     <button onClick={(e) => { e.stopPropagation(); exportMd(note); }}
                       style={{ padding: "6px 10px", fontSize: 12, color: T.textMuted, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
                       onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
                       onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
                       导出
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); if (confirm("确定删除「" + (note.title || "无标题") + "」吗？")) { supabase.from("notes").delete().eq("id", note.id).then(() => setNotes((p) => p.filter((n) => n.id !== note.id))); } }}
+                    <button onClick={(e) => { e.stopPropagation(); const cCount = notes.filter((n) => n.parent_id === note.id).length; const msg = cCount > 0 ? `此文档下有 ${cCount} 篇子文档，删除后子文档将移到上级目录。确定删除吗？` : `确定删除「${note.title || "无标题"}」吗？`; if (confirm(msg)) { const pid = note.parent_id || null; const childIds = notes.filter((n) => n.parent_id === note.id); Promise.all(childIds.map((c) => supabase.from("notes").update({ parent_id: pid }).eq("id", c.id))).then(() => supabase.from("notes").delete().eq("id", note.id)).then(() => setNotes((p) => p.map((n) => n.parent_id === note.id ? { ...n, parent_id: pid } : n).filter((n) => n.id !== note.id))); } }}
                       style={{ padding: "6px 10px", fontSize: 12, color: T.deleteText, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 }}
                       onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.deleteBorder; }}
                       onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
@@ -507,13 +696,58 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           </div>
         </div>
       </div>
+
+      {/* ── 移动文档弹窗 ── */}
+      {moveTarget && (() => {
+        const movingNote = notes.find((n) => n.id === moveTarget.noteId);
+        if (!movingNote) return null;
+        // 可选目标：根目录 + 所有非自己及非自己后代的文档
+        const selfAndDescendants = new Set();
+        function collectDesc(id) { selfAndDescendants.add(id); notes.filter((n) => n.parent_id === id).forEach((n) => collectDesc(n.id)); }
+        collectDesc(moveTarget.noteId);
+        const targets = notes.filter((n) => !selfAndDescendants.has(n.id));
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.5)" }}
+            onClick={(e) => { if (e.target === e.currentTarget) setMoveTarget(null); }}>
+            <div style={{ width: 400, maxWidth: "90vw", maxHeight: "70vh", background: T.card, borderRadius: 12, boxShadow: T.shadowCard, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text }}>移动「{movingNote.title || "无标题"}」到...</h3>
+                <button onClick={() => setMoveTarget(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: T.textMuted, lineHeight: 1 }}>×</button>
+              </div>
+              <div style={{ flex: 1, overflow: "auto", padding: "8px 12px" }}>
+                <div onClick={() => moveNote(moveTarget.noteId, null)}
+                  style={{ padding: "10px 12px", borderRadius: 8, cursor: "pointer", fontSize: 14, color: !movingNote.parent_id ? T.textPlaceholder : T.text, display: "flex", alignItems: "center", gap: 8, transition: "background .12s" }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
+                  onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
+                  🏠 根目录 {!movingNote.parent_id && <span style={{ fontSize: 11, color: T.textPlaceholder }}>(当前)</span>}
+                </div>
+                {targets.map((t) => {
+                  const isCurrent = movingNote.parent_id === t.id;
+                  const depth = getAncestors(notes, t.id).length - 1;
+                  return (
+                    <div key={t.id} onClick={() => !isCurrent && moveNote(moveTarget.noteId, t.id)}
+                      style={{ padding: "10px 12px", paddingLeft: 12 + depth * 16, borderRadius: 8, cursor: isCurrent ? "default" : "pointer", fontSize: 14, color: isCurrent ? T.textPlaceholder : T.text, display: "flex", alignItems: "center", gap: 8, transition: "background .12s" }}
+                      onMouseEnter={(e) => { if (!isCurrent) e.currentTarget.style.background = T.listHover; }}
+                      onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
+                      {notes.some((n) => n.parent_id === t.id) ? "📁" : "📄"} {t.title || "无标题"} {isCurrent && <span style={{ fontSize: 11, color: T.textPlaceholder }}>(当前)</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 
   if (!activeNote) { setView("list"); return null; }
 
   /* ===== 阅读视图 ===== */
-  if (view === "read") return (
+  if (view === "read") {
+    const readAncestors = getAncestors(notes, activeNote.parent_id);
+    const childNotes = notes.filter((n) => n.parent_id === activeId).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    return (
     <div style={{ minHeight: "100vh", background: T.bg, fontFamily: "'Noto Serif SC',serif" }}>
       <style>{getCSS(dark)}</style>
 
@@ -522,11 +756,27 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           <button onClick={backToList} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 返回列表</button>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {themeBtn}
+            <button onClick={() => addNote(activeId)} style={{ padding: "5px 14px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>＋ 子文档</button>
             <button onClick={() => goToEdit(activeId)} style={{ padding: "5px 14px", background: T.btnBg, color: T.btnText, border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>编辑</button>
             <button onClick={deleteNote} style={{ padding: "5px 14px", background: T.deleteBg, color: T.deleteText, border: `1px solid ${T.deleteBorder}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>删除</button>
           </div>
         </div>
       </header>
+
+      {/* 面包屑 */}
+      {(readAncestors.length > 0 || activeNote.parent_id) && (
+        <div style={{ padding: "8px 24px", fontSize: 12, color: T.textMuted, background: T.card, borderBottom: `1px solid ${T.borderLight}`, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+          <span onClick={() => { setCurrentFolder(null); setView("list"); setActiveId(null); window.history.pushState({ view: "list", noteId: null, folderId: null }, ""); }} style={{ cursor: "pointer", textDecoration: "underline" }}>🏠 根目录</span>
+          {readAncestors.map((a) => (
+            <span key={a.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ color: T.textPlaceholder }}>/</span>
+              <span onClick={() => navToFolder(a.id)} style={{ cursor: "pointer", textDecoration: "underline" }}>{a.title || "无标题"}</span>
+            </span>
+          ))}
+          <span style={{ color: T.textPlaceholder }}>/</span>
+          <span style={{ color: T.text, fontWeight: 600 }}>{activeNote.title || "无标题"}</span>
+        </div>
+      )}
 
       <div style={{ background: BANNERS[activeNote.banner || 0], padding: "16px 24px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", maxHeight: 88, overflow: "hidden" }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "#fff", textShadow: "0 1px 6px rgba(0,0,0,.2)", lineHeight: 1.4, margin: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "60%" }}>
@@ -551,7 +801,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
         </div>
       </div>
 
-      <div style={{ padding: "28px 24px 80px" }}>
+      <div style={{ padding: "28px 24px 20px" }}>
         <div className="article-body"
           onClick={(e) => {
             const el = e.target.closest(".script-link");
@@ -563,8 +813,32 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           }}
           dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*暂无内容*", activeNote.scripts) }} />
       </div>
+
+      {/* 子文档列表 */}
+      {childNotes.length > 0 && (
+        <div style={{ padding: "0 24px 80px" }}>
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 20 }}>
+            <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              📂 子文档 <span style={{ fontSize: 12, fontWeight: 400, color: T.textMuted }}>({childNotes.length})</span>
+            </h3>
+            <div style={{ background: T.card, borderRadius: 10, overflow: "hidden", boxShadow: T.shadow }}>
+              {childNotes.map((cn, i) => (
+                <div key={cn.id} onClick={() => openNote(cn.id)}
+                  style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", cursor: "pointer", borderBottom: i < childNotes.length - 1 ? `1px solid ${T.borderLight}` : "none", transition: "background .12s" }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
+                  onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
+                  <span style={{ fontSize: 13 }}>{notes.some((n) => n.parent_id === cn.id) ? "📁" : "📄"}</span>
+                  <span style={{ fontSize: 14, color: T.text, fontWeight: 500 }}>{cn.title || "无标题"}</span>
+                  <span style={{ fontSize: 12, color: T.textPlaceholder, marginLeft: "auto" }}>{fmtDate(cn.updated_at)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      {childNotes.length === 0 && <div style={{ height: 60 }} />}
     </div>
-  );
+  );}
 
   /* ===== 编辑视图 ===== */
   return (
@@ -574,7 +848,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       <header style={{ background: T.headerBg, borderBottom: `1px solid ${T.border}`, position: "sticky", top: 0, zIndex: 100 }}>
         <div style={{ padding: "0 24px", height: 48, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-            <button onClick={() => { setView("list"); setActiveId(null); window.history.pushState({ view: "list", noteId: null }, ""); }} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 首页</button>
+            <button onClick={() => { setView("list"); setActiveId(null); setCurrentFolder(null); window.history.pushState({ view: "list", noteId: null, folderId: null }, ""); }} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 首页</button>
             <button onClick={() => window.history.back()} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 返回阅读</button>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
