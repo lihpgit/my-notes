@@ -189,9 +189,17 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [expanded, setExpanded] = useState({}); // 侧边栏树展开状态 {id: true/false}
   const [moveTarget, setMoveTarget] = useState(null); // 移动弹窗 {id}
   const [folderEditor, setFolderEditor] = useState(null); // 文件夹弹窗 {mode:'create'|'rename', id, parentId, name}
+  const [narrow, setNarrow] = useState(typeof window !== "undefined" && window.innerWidth < 768);
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
+
+  // 响应式：窄屏（手机/小窗）时调整布局，保证标题始终可见
+  useEffect(() => {
+    const onResize = () => setNarrow(window.innerWidth < 768);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   // 文件夹集合 + 有效父级（父级必须是文件夹，否则视为根目录）
   const folderSet = useMemo(() => new Set(notes.filter((n) => n.is_folder).map((n) => n.id)), [notes]);
@@ -571,11 +579,11 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
         <span style={{ fontSize: 13, opacity: .8 }}>共 {noteCount} 篇文章 · 记录学习与成长</span>
       </div>
 
-      <div style={{ padding: "24px 24px 60px", display: "flex", gap: 24 }}>
+      <div style={{ padding: narrow ? "16px 14px 60px" : "24px 24px 60px", display: "flex", flexDirection: narrow ? "column" : "row", gap: narrow ? 16 : 24 }}>
         {/* ── 左侧：文档目录树 + 标签 ── */}
-        <aside style={{ width: 220, flexShrink: 0, position: "sticky", top: 80, alignSelf: "flex-start", display: "flex", flexDirection: "column", gap: 16, maxHeight: "calc(100vh - 100px)", overflow: "auto" }}>
+        <aside style={{ width: narrow ? "100%" : 220, flexShrink: 0, position: narrow ? "static" : "sticky", top: 80, alignSelf: "flex-start", display: "flex", flexDirection: narrow ? "row" : "column", gap: 16, maxHeight: narrow ? 220 : "calc(100vh - 100px)", overflow: "auto" }}>
           {/* 目录树 */}
-          <div style={{ background: T.sidebarBg, borderRadius: 10, padding: "12px", boxShadow: T.shadow }}>
+          <div style={{ background: T.sidebarBg, borderRadius: 10, padding: "12px", boxShadow: T.shadow, flex: narrow ? 1 : "none", minWidth: 0 }}>
             <h4 style={{ fontSize: 13, fontWeight: 600, color: T.textMuted, marginBottom: 8, padding: "0 4px" }}>📂 文档目录</h4>
             <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <div
@@ -593,7 +601,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           </div>
 
           {/* 标签过滤 */}
-          <div style={{ background: T.sidebarBg, borderRadius: 10, padding: "12px", boxShadow: T.shadow }}>
+          <div style={{ background: T.sidebarBg, borderRadius: 10, padding: "12px", boxShadow: T.shadow, flex: narrow ? 1 : "none", minWidth: 0 }}>
             <h4 style={{ fontSize: 13, fontWeight: 600, color: T.textMuted, marginBottom: 8, padding: "0 4px" }}>🏷️ 标签</h4>
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <button onClick={() => setFilterTag(null)}
@@ -682,11 +690,11 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                   onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
                   onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
                   <div onClick={() => isFolder ? navToFolder(note.id) : openNote(note.id)}
-                    style={{ flex: 1, display: "flex", alignItems: "center", padding: "12px 18px", cursor: "pointer", minWidth: 0, gap: 12 }}>
-                    <div style={{ width: "33%", flexShrink: 0, minWidth: 0 }}>
+                    style={{ flex: 1, display: "flex", alignItems: "center", padding: narrow ? "12px 14px" : "12px 18px", cursor: "pointer", minWidth: 0, gap: 12 }}>
+                    <div style={{ flex: narrow ? "1 1 auto" : "0 0 33%", minWidth: 0 }}>
                       <h3 style={{ fontSize: 15, fontWeight: 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2, display: "flex", alignItems: "center", gap: 6 }}>
                         <span style={{ fontSize: 14, flexShrink: 0 }}>{isFolder ? "📁" : "📄"}</span>
-                        {note.title || (isFolder ? "未命名文件夹" : "无标题")}
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || (isFolder ? "未命名文件夹" : "无标题")}</span>
                       </h3>
                       {!isFolder && (
                         <div style={{ display: "flex", gap: 6, alignItems: "center", overflow: "hidden", paddingLeft: 20 }}>
@@ -697,10 +705,13 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                           {(note.tags || []).length === 0 && <span style={{ fontSize: 12, color: T.textTag }}>无标签</span>}
                         </div>
                       )}
+                      {isFolder && narrow && <div style={{ fontSize: 12, color: T.textMuted, paddingLeft: 20 }}>{itemCount} 个项目</div>}
                     </div>
-                    <p style={{ flex: 1, fontSize: 13, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                      {isFolder ? `${itemCount} 个项目` : (plain || "暂无内容")}
-                    </p>
+                    {!narrow && (
+                      <p style={{ flex: 1, fontSize: 13, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                        {isFolder ? `${itemCount} 个项目` : (plain || "暂无内容")}
+                      </p>
+                    )}
                   </div>
                   <div style={{ display: "flex", gap: 4, flexShrink: 0, marginRight: 14, alignItems: "center" }}>
                     {isFolder && (
