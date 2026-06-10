@@ -191,6 +191,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [folderEditor, setFolderEditor] = useState(null); // 文件夹弹窗 {mode:'create'|'rename', id, parentId, name}
   const [narrow, setNarrow] = useState(typeof window !== "undefined" && window.innerWidth < 768);
   const [uploadingAtt, setUploadingAtt] = useState(false); // 附件上传中
+  const [exportMenu, setExportMenu] = useState(null); // 导出格式选择菜单：当前笔记 id
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
@@ -201,6 +202,14 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  // 点击空白处关闭导出格式菜单
+  useEffect(() => {
+    if (!exportMenu) return;
+    const close = () => setExportMenu(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [exportMenu]);
 
   // 文件夹集合 + 有效父级（父级必须是文件夹，否则视为根目录）
   const folderSet = useMemo(() => new Set(notes.filter((n) => n.is_folder).map((n) => n.id)), [notes]);
@@ -315,7 +324,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
 
   async function addNote(parentId) {
     const pid = parentId !== undefined ? parentId : currentFolder;
-    const n = { id: genId(), title: "", content: "", tags: [], scripts: [], attachments: [], is_folder: false, parent_id: pid || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
+    const n = { id: genId(), title: "", content: "", format: "md", tags: [], scripts: [], attachments: [], is_folder: false, parent_id: pid || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
     setNotes((p) => [n, ...p]);
     navPush("edit", n.id);
     await supabase.from("notes").insert(n);
@@ -368,7 +377,11 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
 
   function openNote(nid) { navPush("read", nid); window.scrollTo(0, 0); }
   function backToList() { window.history.back(); }
-  function goToEdit(nid) { navPush("edit", nid); }
+  function goToEdit(nid) {
+    const n = notes.find((x) => x.id === nid);
+    if (n && n.format === "html") { navPush("read", nid); return; } // HTML 笔记只读
+    navPush("edit", nid);
+  }
 
   /* ─── 移动笔记/文件夹到其他目录（目标只能是文件夹或根目录） ─── */
   async function moveNote(noteId, newParentId) {
@@ -389,29 +402,84 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     const newNotes = [];
     for (const file of files) {
       const text = await file.text();
-      const m = text.match(/^#\s+(.+)$/m);
-      const title = m ? m[1].trim() : file.name.replace(/\.(md|markdown|txt)$/i, "");
-      const content = m ? text.replace(/^#\s+.+\n*/, "") : text;
-      newNotes.push({ id: genId(), title, content, tags: [], scripts: [], attachments: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
+      const isHtml = /\.(html?|htm)$/i.test(file.name);
+      if (isHtml) {
+        // HTML 导入：原文存入 content，标记 format=html（只读，iframe 隔离渲染）
+        if (text.length > 2 * 1024 * 1024) {
+          alert(`「${file.name}」体积约 ${(text.length / 1024 / 1024).toFixed(1)}MB，可能超过云端单条上限导致导入失败。建议精简后再试。`);
+        }
+        const tm = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+        const title = (tm && tm[1].trim()) || file.name.replace(/\.(html?|htm)$/i, "");
+        newNotes.push({ id: genId(), title, content: text, format: "html", tags: [], scripts: [], attachments: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
+      } else {
+        const m = text.match(/^#\s+(.+)$/m);
+        const title = m ? m[1].trim() : file.name.replace(/\.(md|markdown|txt)$/i, "");
+        const content = m ? text.replace(/^#\s+.+\n*/, "") : text;
+        newNotes.push({ id: genId(), title, content, format: "md", tags: [], scripts: [], attachments: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
+      }
     }
     setNotes((p) => [...newNotes, ...p]);
     await supabase.from("notes").insert(newNotes);
     if (newNotes.length === 1) {
-      navPush("edit", newNotes[0].id);
+      // HTML 笔记只读 → 直接进阅读页；Markdown → 进编辑页
+      navPush(newNotes[0].format === "html" ? "read" : "edit", newNotes[0].id);
     }
     e.target.value = "";
+  }
+
+  /* ─── 通用：触发浏览器下载 ─── */
+  function triggerDownload(content, filename, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   /* ─── 导出 .md 文件 ─── */
   function exportMd(note) {
     const md = (note.title ? "# " + note.title + "\n\n" : "") + (note.content || "");
-    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = (note.title || "未命名笔记") + ".md";
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerDownload(md, (note.title || "未命名笔记") + ".md", "text/markdown;charset=utf-8");
+  }
+
+  /* ─── 导出 .html 文件 ───
+     HTML 笔记：直接导出原文；Markdown 笔记：渲染为带内联样式、可独立打开的页面 */
+  function exportHtml(note) {
+    let doc;
+    if (note.format === "html") {
+      doc = note.content || "";
+    } else {
+      const body = renderContent(note.content || "", note.scripts, note.attachments);
+      const safeTitle = (note.title || "未命名笔记").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+      doc = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${safeTitle}</title>
+<style>
+  body { max-width: 760px; margin: 40px auto; padding: 0 20px; font-family: -apple-system, "Noto Serif SC", "Segoe UI", serif; line-height: 1.8; color: #1f2937; }
+  h1, h2, h3, h4 { line-height: 1.3; margin: 1.4em 0 .6em; }
+  h1 { font-size: 28px; } h2 { font-size: 22px; } h3 { font-size: 18px; }
+  p { margin: .8em 0; } img { max-width: 100%; border-radius: 8px; }
+  a { color: #4338ca; } blockquote { margin: 1em 0; padding: .4em 1em; border-left: 4px solid #c7d2fe; background: #f5f7ff; color: #4b5563; }
+  pre { background: #1e293b; color: #e2e8f0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; }
+  :not(pre) > code { background: #eef2ff; color: #4338ca; padding: 2px 6px; border-radius: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid #e5e7eb; padding: 8px 12px; text-align: left; }
+  th { background: #f9fafb; }
+</style>
+</head>
+<body>
+<h1>${safeTitle}</h1>
+${body}
+</body>
+</html>`;
+    }
+    triggerDownload(doc, (note.title || "未命名笔记") + ".html", "text/html;charset=utf-8");
   }
 
   /* ─── 脚本管理 ─── */
@@ -750,7 +818,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
               <input placeholder="搜索全部文章..." value={search} onChange={(e) => setSearch(e.target.value)}
                 style={{ width: "100%", padding: "10px 12px 10px 36px", border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, background: T.inputBg, fontFamily: "'Noto Serif SC',serif", color: T.text }} />
             </div>
-            <input ref={fileInputRef} type="file" accept=".md,.markdown,.txt" multiple onChange={importMd} style={{ display: "none" }} />
+            <input ref={fileInputRef} type="file" accept=".md,.markdown,.txt,.html,.htm" multiple onChange={importMd} style={{ display: "none" }} />
             <button onClick={() => setFolderEditor({ mode: "create", parentId: currentFolder, name: "" })}
               style={{ padding: "10px 16px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
               📁 新建文件夹
@@ -775,7 +843,9 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           <div style={{ background: T.card, borderRadius: 10, overflow: "hidden", boxShadow: T.shadow }}>
             {filtered.map((note, i) => {
               const isFolder = note.is_folder;
-              const plain = (note.content || "").replace(/[#*`>\-\[\]()!~_|]/g, "").replace(/\n+/g, " ").trim();
+              const plain = note.format === "html"
+                ? (note.content || "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
+                : (note.content || "").replace(/[#*`>\-\[\]()!~_|]/g, "").replace(/\n+/g, " ").trim();
               const itemCount = isFolder ? notes.filter((n) => parentOf(n) === note.id).length : 0;
               // 递归统计文件夹内全部后代数量（删除确认用）
               const descCount = isFolder ? (() => { let c = 0; const col = (id) => notes.filter((n) => n.parent_id === id).forEach((n) => { c++; col(n.id); }); col(note.id); return c; })() : 0;
@@ -824,13 +894,40 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                       onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
                       移动
                     </button>
-                    {!isFolder && (
-                      <button onClick={(e) => { e.stopPropagation(); exportMd(note); }}
+                    {!isFolder && note.format === "html" && (
+                      <button onClick={(e) => { e.stopPropagation(); exportHtml(note); }}
                         style={{ ...aBtn, color: T.textMuted }}
                         onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
                         onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
                         导出
                       </button>
+                    )}
+                    {!isFolder && note.format !== "html" && (
+                      <div style={{ position: "relative" }}>
+                        <button onClick={(e) => { e.stopPropagation(); setExportMenu(exportMenu === note.id ? null : note.id); }}
+                          style={{ ...aBtn, color: T.textMuted }}
+                          onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
+                          导出 ▾
+                        </button>
+                        {exportMenu === note.id && (
+                          <div onClick={(e) => e.stopPropagation()}
+                            style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 20, background: T.card, border: `1px solid ${T.borderInput}`, borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,.15)", overflow: "hidden", minWidth: 120 }}>
+                            <button onClick={(e) => { e.stopPropagation(); exportMd(note); setExportMenu(null); }}
+                              style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 14px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}
+                              onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
+                              onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
+                              📄 导出 .md
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); exportHtml(note); setExportMenu(null); }}
+                              style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 14px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.textSub, fontFamily: "'Noto Serif SC',serif", borderTop: `1px solid ${T.borderLight}` }}
+                              onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
+                              onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
+                              🌐 导出 .html
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
                     <button onClick={(e) => {
                       e.stopPropagation();
@@ -936,7 +1033,10 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           <button onClick={backToList} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 返回列表</button>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {themeBtn}
-            <button onClick={() => goToEdit(activeId)} style={{ padding: "5px 14px", background: T.btnBg, color: T.btnText, border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>编辑</button>
+            {activeNote.format !== "html" && (
+              <button onClick={() => goToEdit(activeId)} style={{ padding: "5px 14px", background: T.btnBg, color: T.btnText, border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>编辑</button>
+            )}
+            <button onClick={() => exportHtml(activeNote)} style={{ padding: "5px 14px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>导出 HTML</button>
             <button onClick={deleteNote} style={{ padding: "5px 14px", background: T.deleteBg, color: T.deleteText, border: `1px solid ${T.deleteBorder}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>删除</button>
           </div>
         </div>
@@ -975,11 +1075,28 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
         <div style={{ display: "flex", gap: 16, fontSize: 13, color: T.textMuted, paddingBottom: 20, borderBottom: `1px solid ${T.border}`, flexWrap: "wrap" }}>
           <span>📅 {fmtDate(activeNote.created_at)}</span>
           <span>✏️ {fmtDate(activeNote.updated_at)}</span>
-          <span>📖 {wordCount(activeNote.content)} 字</span>
-          <span>⏱ {readTime(activeNote.content)}</span>
+          {activeNote.format === "html" ? (
+            <span>🌐 HTML 文档（只读）</span>
+          ) : (
+            <>
+              <span>📖 {wordCount(activeNote.content)} 字</span>
+              <span>⏱ {readTime(activeNote.content)}</span>
+            </>
+          )}
         </div>
       </div>
 
+      {activeNote.format === "html" ? (
+        // HTML 笔记：iframe 沙箱隔离渲染，原样保留页面自带样式。
+        // sandbox 开 allow-scripts 但不开 allow-same-origin —— 脚本能跑，却访问不到父页/Supabase 会话，XSS 被隔离在 iframe 内。
+        <div style={{ padding: "0 0 20px" }}>
+          <iframe
+            title={activeNote.title || "HTML 笔记"}
+            srcDoc={activeNote.content || ""}
+            sandbox="allow-scripts allow-popups allow-forms"
+            style={{ width: "100%", height: "calc(100vh - 230px)", minHeight: 400, border: "none", background: "#fff" }} />
+        </div>
+      ) : (
       <div style={{ padding: "28px 24px 20px" }}>
         <div className="article-body"
           onClick={(e) => {
@@ -992,6 +1109,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           }}
           dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*暂无内容*", activeNote.scripts, activeNote.attachments) }} />
       </div>
+      )}
       <div style={{ height: 60 }} />
     </div>
   );}
