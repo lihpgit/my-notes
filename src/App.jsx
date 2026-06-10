@@ -664,14 +664,35 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           continue;
         }
       } else if (kind === "html") {
-        // HTML 导入：原文存入 content，标记 format=html（只读，iframe 隔离渲染）
-        const text = await file.text();
+        // HTML 导入：原文存入 content，标记 format=html（只读，iframe 隔离渲染）。
+        // 正文里较大的 base64 内嵌图片拆出来压缩上传 Storage、替换为 URL（瘦身正文，
+        // 避免撑大笔记拖慢全量加载）；小图标保持内联；单张失败保留内联不影响导入
+        let text = await file.text();
+        const uploadedImgs = [];
+        try {
+          const seen = new Map(); // 相同图片去重
+          for (const mt of [...text.matchAll(/data:image\/(png|jpe?g|webp|bmp|gif);base64,([A-Za-z0-9+/=]+)/g)]) {
+            const dataUri = mt[0];
+            if (dataUri.length < 12 * 1024 || seen.has(dataUri)) continue;
+            const mimeRaw = "image/" + mt[1].toLowerCase();
+            const bytes = Uint8Array.from(atob(mt[2]), (c) => c.charCodeAt(0));
+            const { blob, mime } = await compressImageBlob(new Blob([bytes], { type: mimeRaw }), mimeRaw);
+            const ext = (mime.split("/")[1] || "png").replace("jpeg", "jpg");
+            const path = `${user.id}/${genId()}.${ext}`;
+            const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, blob, { contentType: mime, upsert: false });
+            if (error) continue; // 上传失败：该图保持内联
+            const url = supabase.storage.from(ATT_BUCKET).getPublicUrl(path).data.publicUrl;
+            uploadedImgs.push({ name: `${file.name.replace(/\.(html?|htm|doc)$/i, "")}-img${uploadedImgs.length + 1}.${ext}`, type: mime, path, url });
+            seen.set(dataUri, url);
+            text = text.split(dataUri).join(url);
+          }
+        } catch { /* 拆图异常则整体保持原文 */ }
         if (text.length > 2 * 1024 * 1024) {
           alert(`「${file.name}」体积约 ${(text.length / 1024 / 1024).toFixed(1)}MB，可能超过云端单条上限导致导入失败。建议精简后再试。`);
         }
         const tm = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
         const title = (tm && tm[1].trim()) || file.name.replace(/\.(html?|htm|doc)$/i, "");
-        newNotes.push({ ...base, title, content: text, format: "html" });
+        newNotes.push({ ...base, title, content: text, format: "html", attachments: uploadedImgs });
       } else {
         const text = await file.text();
         const m = text.match(/^#\s+(.+)$/m);
@@ -825,12 +846,20 @@ ${body}
     const newAtts = [];
     try {
       for (const f of files) {
-        const ext = f.name.includes(".") ? "." + f.name.split(".").pop() : "";
+        // 图片附件先压缩（WebP+限宽），转格式时同步改文件名后缀，保持下载体验一致
+        let data = f, mimeType = f.type || "application/octet-stream", name = f.name;
+        if ((f.type || "").startsWith("image/")) {
+          const r = await compressImageBlob(f, f.type);
+          if (r.mime !== f.type) name = name.replace(/\.[^.]+$/, "") + ".webp";
+          data = r.blob;
+          mimeType = r.mime;
+        }
+        const ext = name.includes(".") ? "." + name.split(".").pop() : "";
         const path = `${user.id}/${genId()}${ext}`;
-        const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, f, { contentType: f.type || "application/octet-stream", upsert: false });
+        const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, data, { contentType: mimeType, upsert: false });
         if (error) { alert(`上传「${f.name}」失败：${error.message}`); continue; }
         const url = supabase.storage.from(ATT_BUCKET).getPublicUrl(path).data.publicUrl;
-        newAtts.push({ name: f.name, type: f.type || "", path, url });
+        newAtts.push({ name, type: mimeType, path, url });
       }
     } finally {
       setUploadingAtt(false);
