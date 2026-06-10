@@ -69,6 +69,24 @@ function folderCmp(a, b) {
   return a.sort_order - b.sort_order;
 }
 
+/* 导入图片压缩：重编码为 WebP(质量0.82) 并限宽 1920px，Confluence/Word 截图常为全尺寸 PNG，
+   通常可省 60~85%。护栏：压缩结果未小于原图 90% 则保留原图；gif/svg 等跳过（避免动图变静图） */
+async function compressImageBlob(blob, mime) {
+  try {
+    if (!/^image\/(png|jpe?g|webp|bmp)$/i.test(mime)) return { blob, mime };
+    const bmp = await createImageBitmap(blob);
+    const scale = Math.min(1, 1920 / bmp.width);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bmp.width * scale));
+    canvas.height = Math.max(1, Math.round(bmp.height * scale));
+    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    bmp.close();
+    const out = await new Promise((res) => canvas.toBlob(res, "image/webp", 0.82));
+    if (out && out.size < blob.size * 0.9) return { blob: out, mime: "image/webp" };
+  } catch { /* 解码失败按原图上传 */ }
+  return { blob, mime };
+}
+
 // 解码 MIME quoted-printable（Confluence「导出 Word」的 MHTML 用它编码 HTML 部件）
 function decodeQP(s, charset = "utf-8") {
   s = s.replace(/=\r?\n/g, ""); // 软换行
@@ -567,14 +585,15 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           const mammoth = m.default || m;
           const convertImage = mammoth.images.imgElement(async (image) => {
             const b64 = await image.read("base64");
-            const contentType = image.contentType || "image/png";
-            const ext = (contentType.split("/")[1] || "png").replace("jpeg", "jpg");
-            const path = `${user.id}/${genId()}.${ext}`;
+            const rawType = image.contentType || "image/png";
             const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-            const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, new Blob([bytes], { type: contentType }), { contentType, upsert: false });
+            const { blob, mime } = await compressImageBlob(new Blob([bytes], { type: rawType }), rawType);
+            const ext = (mime.split("/")[1] || "png").replace("jpeg", "jpg");
+            const path = `${user.id}/${genId()}.${ext}`;
+            const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, blob, { contentType: mime, upsert: false });
             if (error) throw new Error("内嵌图片上传失败：" + error.message);
             const url = supabase.storage.from(ATT_BUCKET).getPublicUrl(path).data.publicUrl;
-            uploadedImgs.push({ name: `${title}-img${uploadedImgs.length + 1}.${ext}`, type: contentType, path, url });
+            uploadedImgs.push({ name: `${title}-img${uploadedImgs.length + 1}.${ext}`, type: mime, path, url });
             return { src: url };
           });
           const { value: bodyHtml } = await mammoth.convertToHtml({ arrayBuffer: await file.arrayBuffer() }, { convertImage });
@@ -619,12 +638,13 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
                 : decodeQP(body, charset);
             } else if (ct.startsWith("image/") && enc === "base64") {
               const bytes = Uint8Array.from(atob(body.replace(/\s/g, "")), (c) => c.charCodeAt(0));
-              const ext = (ct.split("/")[1] || "png").replace("jpeg", "jpg");
+              const { blob, mime } = await compressImageBlob(new Blob([bytes], { type: ct }), ct);
+              const ext = (mime.split("/")[1] || "png").replace("jpeg", "jpg");
               const path = `${user.id}/${genId()}.${ext}`;
-              const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, new Blob([bytes], { type: ct }), { contentType: ct, upsert: false });
+              const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, blob, { contentType: mime, upsert: false });
               if (error) throw new Error("内嵌图片上传失败：" + error.message);
               const url = supabase.storage.from(ATT_BUCKET).getPublicUrl(path).data.publicUrl;
-              uploadedImgs.push({ name: `${file.name.replace(/\.doc$/i, "")}-img${uploadedImgs.length + 1}.${ext}`, type: ct, path, url });
+              uploadedImgs.push({ name: `${file.name.replace(/\.doc$/i, "")}-img${uploadedImgs.length + 1}.${ext}`, type: mime, path, url });
               imgMap.push({ loc, cid, url });
             }
           }
