@@ -192,6 +192,14 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [narrow, setNarrow] = useState(typeof window !== "undefined" && window.innerWidth < 768);
   const [uploadingAtt, setUploadingAtt] = useState(false); // 附件上传中
   const [exportMenu, setExportMenu] = useState(null); // 导出格式选择菜单：当前笔记 id
+  const [dragId, setDragId] = useState(null); // 正在拖拽的文档 id
+  const [dragOverId, setDragOverId] = useState(null); // 拖拽悬停的目标文档 id
+  const [dragTag, setDragTag] = useState(null); // 正在拖拽的标签
+  const [dragOverTag, setDragOverTag] = useState(null); // 拖拽悬停的目标标签
+  // 标签显示顺序（仅本机持久化；标签是从笔记聚合的派生数据，云端无实体）
+  const [tagOrder, setTagOrder] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("tagOrder:" + user.id)) || []; } catch { return []; }
+  });
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
   const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
@@ -295,9 +303,15 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       r = notes.filter((n) => (n.parent_id && folderSet.has(n.parent_id) ? n.parent_id : null) === currentFolder);
     }
     if (filterTag) r = r.filter((n) => (n.tags || []).includes(filterTag));
-    // 文件夹排前（按名称），笔记排后（按更新时间降序）
+    // 文件夹排前（按名称），笔记排后：有手动排序(sort_order)按它升序，
+    // 未排序的(null)视为最新置顶、按更新时间降序 —— 兼容老数据且新建文档仍出现在顶部
     const fs = r.filter((n) => n.is_folder).sort((a, b) => (a.title || "").localeCompare(b.title || "", "zh"));
-    const ds = r.filter((n) => !n.is_folder).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    const ds = r.filter((n) => !n.is_folder).sort((a, b) => {
+      const an = a.sort_order == null, bn = b.sort_order == null;
+      if (an && bn) return (b.updated_at || 0) - (a.updated_at || 0);
+      if (an !== bn) return an ? -1 : 1;
+      return a.sort_order - b.sort_order;
+    });
     return [...fs, ...ds];
   }, [notes, filterTag, search, currentFolder, folderSet]);
 
@@ -306,6 +320,57 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     notes.forEach((n) => (n.tags || []).forEach((t) => s.add(t)));
     return [...s];
   }, [notes]);
+
+  // 侧边栏标签按用户拖拽过的顺序显示；新出现的标签补在末尾，已消失的自动剔除
+  const orderedTags = useMemo(() => {
+    const known = tagOrder.filter((t) => allTags.includes(t));
+    const rest = allTags.filter((t) => !tagOrder.includes(t));
+    return [...known, ...rest];
+  }, [allTags, tagOrder]);
+
+  // 仅在默认浏览（无搜索、无标签筛选）时允许拖拽文档排序，避免对子集重排的歧义
+  const canDragDocs = !search && !filterTag;
+
+  /* 拖拽文档放下：把 dragId 插到 targetId 的位置，对当前列表的文档重新编号并持久化 */
+  function dropNoteOn(targetId) {
+    const from = dragId;
+    setDragId(null); setDragOverId(null);
+    if (!from || from === targetId) return;
+    const docs = filtered.filter((n) => !n.is_folder);
+    const fi = docs.findIndex((n) => n.id === from);
+    const ti = docs.findIndex((n) => n.id === targetId);
+    if (fi < 0 || ti < 0) return;
+    const arr = [...docs];
+    const [moved] = arr.splice(fi, 1);
+    arr.splice(ti, 0, moved);
+    const orderMap = new Map(arr.map((n, i) => [n.id, i]));
+    const changed = [];
+    const updated = notes.map((n) => {
+      const o = orderMap.get(n.id);
+      if (o !== undefined && n.sort_order !== o) { const u = { ...n, sort_order: o }; changed.push(u); return u; }
+      return n;
+    });
+    setNotes(updated);
+    if (changed.length) {
+      supabase.from("notes").upsert(changed).then(({ error }) => {
+        if (error) alert("排序保存失败：" + error.message + "\n（若提示 sort_order 不存在，需先在 Supabase 执行 alter table notes add column sort_order double precision;）");
+      });
+    }
+  }
+
+  /* 拖拽标签放下：调整本机标签顺序并写回 localStorage */
+  function dropTagOn(target) {
+    const from = dragTag;
+    setDragTag(null); setDragOverTag(null);
+    if (!from || from === target) return;
+    const arr = [...orderedTags];
+    const fi = arr.indexOf(from), ti = arr.indexOf(target);
+    if (fi < 0 || ti < 0) return;
+    arr.splice(fi, 1);
+    arr.splice(ti, 0, from);
+    setTagOrder(arr);
+    try { localStorage.setItem("tagOrder:" + user.id, JSON.stringify(arr)); } catch { /* 存储不可用时仅本次会话生效 */ }
+  }
 
   const save = useCallback((note) => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -772,12 +837,17 @@ ${body}
                 style={{ textAlign: "left", padding: "5px 8px", borderRadius: 6, border: "none", background: !filterTag ? T.activeFilter : "transparent", color: !filterTag ? T.text : T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: !filterTag ? 600 : 400 }}>
                 全部 <span style={{ fontSize: 11, color: T.textPlaceholder, marginLeft: 4 }}>{notes.length}</span>
               </button>
-              {allTags.map((t) => {
+              {orderedTags.map((t) => {
                 const c = TC[t] || { bg: dark ? "#27272a" : "#f5f5f5", fg: dark ? "#a1a1aa" : "#666" };
                 const count = notes.filter((n) => (n.tags || []).includes(t)).length;
                 return (
                   <button key={t} onClick={() => setFilterTag(filterTag === t ? null : t)}
-                    style={{ textAlign: "left", padding: "5px 8px", borderRadius: 6, border: "none", background: filterTag === t ? c.bg : "transparent", color: filterTag === t ? c.fg : T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: filterTag === t ? 600 : 400 }}>
+                    draggable
+                    onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragTag(t); }}
+                    onDragOver={(e) => { if (dragTag && dragTag !== t) { e.preventDefault(); setDragOverTag(t); } }}
+                    onDrop={() => dropTagOn(t)}
+                    onDragEnd={() => { setDragTag(null); setDragOverTag(null); }}
+                    style={{ textAlign: "left", padding: "5px 8px", borderRadius: 6, border: "none", background: filterTag === t ? c.bg : "transparent", color: filterTag === t ? c.fg : T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: filterTag === t ? 600 : 400, opacity: dragTag === t ? .4 : 1, boxShadow: dragOverTag === t && dragTag !== t ? `inset 0 2px 0 ${dark ? "#60a5fa" : "#6366f1"}` : "none" }}>
                     {t} <span style={{ fontSize: 11, color: T.textPlaceholder, marginLeft: 4 }}>{count}</span>
                   </button>
                 );
@@ -850,9 +920,15 @@ ${body}
               // 递归统计文件夹内全部后代数量（删除确认用）
               const descCount = isFolder ? (() => { let c = 0; const col = (id) => notes.filter((n) => n.parent_id === id).forEach((n) => { c++; col(n.id); }); col(note.id); return c; })() : 0;
               const aBtn = { padding: "6px 10px", fontSize: 12, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 };
+              const draggableDoc = canDragDocs && !isFolder;
               return (
                 <div key={note.id} className="card-anim"
-                  style={{ display: "flex", alignItems: "center", borderBottom: i < filtered.length - 1 ? `1px solid ${T.borderLight}` : "none", animationDelay: i * .04 + "s", transition: "background .15s" }}
+                  draggable={draggableDoc}
+                  onDragStart={draggableDoc ? (e) => { e.dataTransfer.effectAllowed = "move"; setDragId(note.id); } : undefined}
+                  onDragOver={draggableDoc ? (e) => { if (dragId && dragId !== note.id) { e.preventDefault(); setDragOverId(note.id); } } : undefined}
+                  onDrop={draggableDoc ? () => dropNoteOn(note.id) : undefined}
+                  onDragEnd={draggableDoc ? () => { setDragId(null); setDragOverId(null); } : undefined}
+                  style={{ display: "flex", alignItems: "center", borderBottom: i < filtered.length - 1 ? `1px solid ${T.borderLight}` : "none", animationDelay: i * .04 + "s", transition: "background .15s", opacity: dragId === note.id ? .4 : 1, boxShadow: dragOverId === note.id && dragId !== note.id ? `inset 0 2px 0 ${dark ? "#60a5fa" : "#6366f1"}` : "none" }}
                   onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
                   onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
                   <div onClick={() => isFolder ? navToFolder(note.id) : openNote(note.id)}
