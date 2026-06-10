@@ -69,6 +69,21 @@ function folderCmp(a, b) {
   return a.sort_order - b.sort_order;
 }
 
+// 解码 MIME quoted-printable（Confluence「导出 Word」的 MHTML 用它编码 HTML 部件）
+function decodeQP(s, charset = "utf-8") {
+  s = s.replace(/=\r?\n/g, ""); // 软换行
+  const bytes = new Uint8Array(s.length);
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "=" && /^[0-9A-Fa-f]{2}$/.test(s.slice(i + 1, i + 3))) {
+      bytes[n++] = parseInt(s.slice(i + 1, i + 3), 16);
+      i += 2;
+    } else bytes[n++] = s.charCodeAt(i) & 0xff;
+  }
+  try { return new TextDecoder(charset).decode(bytes.subarray(0, n)); }
+  catch { return new TextDecoder("utf-8").decode(bytes.subarray(0, n)); }
+}
+
 // 沿 parent_id 链向上找祖先文件夹（遇到非文件夹即停止）
 function getAncestors(notes, startParentId) {
   const path = [];
@@ -519,12 +534,14 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       if (/\.pdf$/i.test(file.name)) kind = "pdf";
       else if (/\.docx$/i.test(file.name)) kind = "docx";
       else if (/\.doc$/i.test(file.name)) {
-        const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
-        const headText = String.fromCharCode(...head).trimStart();
+        const headBuf = await file.slice(0, 256).arrayBuffer();
+        const head = new Uint8Array(headBuf);
+        const headText = new TextDecoder("utf-8").decode(headBuf).trimStart(); // TextDecoder 自动剥 BOM
         if (head[0] === 0x50 && head[1] === 0x4b) kind = "docx"; // PK → zip，实为 OOXML
         else if (headText.startsWith("<")) kind = "html"; // HTML 伪装的 .doc
+        else if (/^(message-id|mime-version|content-type|subject|from)\s*:/im.test(headText.slice(0, 200))) kind = "mhtml"; // Confluence「导出 Word」实为 MHTML
         else {
-          alert(`「${file.name}」是旧版二进制 .doc 格式，浏览器无法解析。建议在企业微信中导出为 .docx 或 PDF 后再导入。`);
+          alert(`「${file.name}」是旧版二进制 .doc 格式，浏览器无法解析。建议导出为 .docx 或 PDF 后再导入。`);
           continue;
         }
       }
@@ -572,6 +589,56 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           newNotes.push({ ...base, title, content: html, format: "html", attachments: uploadedImgs });
         } catch (err) {
           // 转换失败时回滚已上传的图片，避免 Storage 留下孤儿文件
+          if (uploadedImgs.length) await supabase.storage.from(ATT_BUCKET).remove(uploadedImgs.map((i) => i.path));
+          alert(`解析「${file.name}」失败：${err.message || err}`);
+          continue;
+        }
+      } else if (kind === "mhtml") {
+        // Confluence「导出 Word」的 .doc 实为 MHTML：按 MIME boundary 拆部件，
+        // HTML 部件解码（quoted-printable/base64）做正文，图片部件上传 Storage 并把引用改为 URL
+        const uploadedImgs = [];
+        try {
+          const raw = await file.text();
+          const bm = raw.match(/boundary="?([^"\r\n;]+)"?/i);
+          let html = null;
+          const imgMap = [];
+          const parts = bm ? raw.split("--" + bm[1]) : [raw];
+          for (const part of parts) {
+            const headerEnd = part.search(/\r?\n\r?\n/);
+            if (headerEnd < 0) continue;
+            const headers = part.slice(0, headerEnd);
+            const body = part.slice(headerEnd).replace(/^\s+/, "").replace(/\s+$/, "");
+            const ct = ((headers.match(/content-type:\s*([^;\r\n]+)/i) || [])[1] || "").trim().toLowerCase();
+            const charset = (headers.match(/charset="?([\w-]+)"?/i) || [])[1] || "utf-8";
+            const enc = ((headers.match(/content-transfer-encoding:\s*(\S+)/i) || [])[1] || "").toLowerCase();
+            const loc = ((headers.match(/content-location:\s*(\S+)/i) || [])[1] || "").trim();
+            const cid = ((headers.match(/content-id:\s*<?([^>\r\n]+)>?/i) || [])[1] || "").trim();
+            if (ct === "text/html" && html == null) {
+              html = enc === "base64"
+                ? new TextDecoder(charset).decode(Uint8Array.from(atob(body.replace(/\s/g, "")), (c) => c.charCodeAt(0)))
+                : decodeQP(body, charset);
+            } else if (ct.startsWith("image/") && enc === "base64") {
+              const bytes = Uint8Array.from(atob(body.replace(/\s/g, "")), (c) => c.charCodeAt(0));
+              const ext = (ct.split("/")[1] || "png").replace("jpeg", "jpg");
+              const path = `${user.id}/${genId()}.${ext}`;
+              const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, new Blob([bytes], { type: ct }), { contentType: ct, upsert: false });
+              if (error) throw new Error("内嵌图片上传失败：" + error.message);
+              const url = supabase.storage.from(ATT_BUCKET).getPublicUrl(path).data.publicUrl;
+              uploadedImgs.push({ name: `${file.name.replace(/\.doc$/i, "")}-img${uploadedImgs.length + 1}.${ext}`, type: ct, path, url });
+              imgMap.push({ loc, cid, url });
+            }
+          }
+          if (html == null) throw new Error("未找到 HTML 内容部件，可能不是 Confluence 导出的格式");
+          // 把正文里对图片部件的引用（Content-Location / cid:）替换为 Storage URL
+          for (const im of imgMap) {
+            if (im.loc) html = html.split(im.loc).join(im.url);
+            if (im.cid) html = html.split("cid:" + im.cid).join(im.url);
+          }
+          const tm = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+          const title = (tm && tm[1].trim()) || file.name.replace(/\.doc$/i, "");
+          newNotes.push({ ...base, title, content: html, format: "html", attachments: uploadedImgs });
+        } catch (err) {
+          // 解析失败回滚已上传的图片，避免 Storage 留下孤儿文件
           if (uploadedImgs.length) await supabase.storage.from(ATT_BUCKET).remove(uploadedImgs.map((i) => i.path));
           alert(`解析「${file.name}」失败：${err.message || err}`);
           continue;
