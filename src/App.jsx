@@ -419,6 +419,14 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     window.history.pushState({ view: "list", noteId: null, folderId: currentFolder }, "");
   }
 
+  /* 删除单条笔记并清理其 Storage 附件（列表卡片删除入口；修复原先直删行导致附件成孤儿文件的问题） */
+  async function removeNote(note) {
+    const paths = (note.attachments || []).map((a) => a.path).filter(Boolean);
+    await supabase.from("notes").delete().eq("id", note.id);
+    if (paths.length) await supabase.storage.from(ATT_BUCKET).remove(paths);
+    setNotes((p) => p.filter((n) => n.id !== note.id));
+  }
+
   /* ─── 文件夹增删改 ─── */
   async function addFolder(name, parentId) {
     const pid = parentId !== undefined ? parentId : currentFolder;
@@ -457,7 +465,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   function backToList() { window.history.back(); }
   function goToEdit(nid) {
     const n = notes.find((x) => x.id === nid);
-    if (n && n.format === "html") { navPush("read", nid); return; } // HTML 笔记只读
+    if (n && ["html", "pdf"].includes(n.format)) { navPush("read", nid); return; } // html/pdf 笔记只读
     navPush("edit", nid);
   }
 
@@ -473,36 +481,72 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     setMoveTarget(null);
   }
 
-  /* ─── 导入 .md 文件（支持批量） ─── */
+  /* ─── 导入文件（支持批量）：md/txt 可编辑；html/docx 转只读 HTML；pdf 存 Storage 原样预览 ─── */
   async function importMd(e) {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     const newNotes = [];
     for (const file of files) {
-      const text = await file.text();
-      const isHtml = /\.(html?|htm)$/i.test(file.name);
-      if (isHtml) {
+      // 每条笔记的公共字段
+      const base = { id: genId(), tags: [], scripts: [], attachments: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
+      if (/\.pdf$/i.test(file.name)) {
+        // PDF：原文件传 Storage，笔记只存引用；文件记录放进笔记自身 attachments，
+        // 这样 deleteNote/deleteFolder/removeNote 的清理逻辑直接覆盖
+        if (file.size > MAX_ATT_SIZE) { alert(`「${file.name}」超过 20MB，请压缩后再导入`); continue; }
+        const path = `${user.id}/${genId()}.pdf`;
+        const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, file, { contentType: "application/pdf", upsert: false });
+        if (error) { alert(`上传「${file.name}」失败：${error.message}`); continue; }
+        const url = supabase.storage.from(ATT_BUCKET).getPublicUrl(path).data.publicUrl;
+        newNotes.push({ ...base, title: file.name.replace(/\.pdf$/i, ""), content: "", format: "pdf", attachments: [{ name: file.name, type: "application/pdf", path, url }] });
+      } else if (/\.docx$/i.test(file.name)) {
+        // Word：mammoth 纯前端转 HTML（图片默认内联为 base64 data URI），走现有 html 只读管线
+        try {
+          const m = await import("mammoth");
+          const mammoth = m.default || m;
+          const { value: bodyHtml } = await mammoth.convertToHtml({ arrayBuffer: await file.arrayBuffer() });
+          const title = file.name.replace(/\.docx$/i, "");
+          const safeTitle = title.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+          const html = `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>${safeTitle}</title>
+<style>body{max-width:760px;margin:32px auto;padding:0 20px;font-family:-apple-system,"Noto Serif SC","Segoe UI",serif;line-height:1.8;color:#1f2937}img{max-width:100%}table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #d1d5db;padding:6px 10px;text-align:left}p{margin:.6em 0}h1,h2,h3{line-height:1.3;margin:1.2em 0 .5em}</style>
+</head><body>${bodyHtml}</body></html>`;
+          if (html.length > 2 * 1024 * 1024) {
+            alert(`「${file.name}」转换后约 ${(html.length / 1024 / 1024).toFixed(1)}MB（多为内嵌图片），可能超过云端单条上限导致保存失败。`);
+          }
+          newNotes.push({ ...base, title, content: html, format: "html" });
+        } catch (err) {
+          alert(`解析「${file.name}」失败：${err.message || err}`);
+          continue;
+        }
+      } else if (/\.doc$/i.test(file.name)) {
+        alert(`「${file.name}」是旧版 .doc 格式，暂不支持。请在企业微信中导出为 .docx 后再导入。`);
+        continue;
+      } else if (/\.(html?|htm)$/i.test(file.name)) {
         // HTML 导入：原文存入 content，标记 format=html（只读，iframe 隔离渲染）
+        const text = await file.text();
         if (text.length > 2 * 1024 * 1024) {
           alert(`「${file.name}」体积约 ${(text.length / 1024 / 1024).toFixed(1)}MB，可能超过云端单条上限导致导入失败。建议精简后再试。`);
         }
         const tm = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
         const title = (tm && tm[1].trim()) || file.name.replace(/\.(html?|htm)$/i, "");
-        newNotes.push({ id: genId(), title, content: text, format: "html", tags: [], scripts: [], attachments: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
+        newNotes.push({ ...base, title, content: text, format: "html" });
       } else {
+        const text = await file.text();
         const m = text.match(/^#\s+(.+)$/m);
         const title = m ? m[1].trim() : file.name.replace(/\.(md|markdown|txt)$/i, "");
         const content = m ? text.replace(/^#\s+.+\n*/, "") : text;
-        newNotes.push({ id: genId(), title, content, format: "md", tags: [], scripts: [], attachments: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id });
+        newNotes.push({ ...base, title, content, format: "md" });
       }
     }
-    setNotes((p) => [...newNotes, ...p]);
-    await supabase.from("notes").insert(newNotes);
-    if (newNotes.length === 1) {
-      // HTML 笔记只读 → 直接进阅读页；Markdown → 进编辑页
-      navPush(newNotes[0].format === "html" ? "read" : "edit", newNotes[0].id);
-    }
     e.target.value = "";
+    if (newNotes.length === 0) return;
+    setNotes((p) => [...newNotes, ...p]);
+    const { error } = await supabase.from("notes").insert(newNotes);
+    if (error) { alert("导入保存失败：" + error.message); return; }
+    if (newNotes.length === 1) {
+      // 只读格式（html/pdf）→ 直接进阅读页；Markdown → 进编辑页
+      navPush(["html", "pdf"].includes(newNotes[0].format) ? "read" : "edit", newNotes[0].id);
+    }
   }
 
   /* ─── 通用：触发浏览器下载 ─── */
@@ -901,7 +945,7 @@ ${body}
               <input placeholder="搜索全部文章..." value={search} onChange={(e) => setSearch(e.target.value)}
                 style={{ width: "100%", padding: "10px 12px 10px 36px", border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, background: T.inputBg, fontFamily: "'Noto Serif SC',serif", color: T.text }} />
             </div>
-            <input ref={fileInputRef} type="file" accept=".md,.markdown,.txt,.html,.htm" multiple onChange={importMd} style={{ display: "none" }} />
+            <input ref={fileInputRef} type="file" accept=".md,.markdown,.txt,.html,.htm,.pdf,.docx,.doc" multiple onChange={importMd} style={{ display: "none" }} />
             <button onClick={() => setFolderEditor({ mode: "create", parentId: currentFolder, name: "" })}
               style={{ padding: "10px 16px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" }}>
               📁 新建文件夹
@@ -926,7 +970,9 @@ ${body}
           <div style={{ background: T.card, borderRadius: 10, overflow: "hidden", boxShadow: T.shadow }}>
             {filtered.map((note, i) => {
               const isFolder = note.is_folder;
-              const plain = note.format === "html"
+              const plain = note.format === "pdf"
+                ? "📕 PDF 文档"
+                : note.format === "html"
                 ? (note.content || "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
                 : (note.content || "").replace(/[#*`>\-\[\]()!~_|]/g, "").replace(/\n+/g, " ").trim();
               const itemCount = isFolder ? notes.filter((n) => parentOf(n) === note.id).length : 0;
@@ -982,6 +1028,14 @@ ${body}
                       onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
                       移动
                     </button>
+                    {!isFolder && note.format === "pdf" && (
+                      <button onClick={(e) => { e.stopPropagation(); const a = (note.attachments || [])[0]; if (a) downloadAttachment(a); }}
+                        style={{ ...aBtn, color: T.textMuted }}
+                        onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
+                        下载
+                      </button>
+                    )}
                     {!isFolder && note.format === "html" && (
                       <button onClick={(e) => { e.stopPropagation(); exportHtml(note); }}
                         style={{ ...aBtn, color: T.textMuted }}
@@ -990,7 +1044,7 @@ ${body}
                         导出
                       </button>
                     )}
-                    {!isFolder && note.format !== "html" && (
+                    {!isFolder && !["html", "pdf"].includes(note.format) && (
                       <div style={{ position: "relative" }}>
                         <button onClick={(e) => { e.stopPropagation(); setExportMenu(exportMenu === note.id ? null : note.id); }}
                           style={{ ...aBtn, color: T.textMuted }}
@@ -1022,7 +1076,7 @@ ${body}
                       if (isFolder) {
                         if (confirm(descCount > 0 ? `「${note.title || "未命名文件夹"}」内含 ${descCount} 个项目，将一并删除且不可恢复。确定删除吗？` : `确定删除空文件夹「${note.title || "未命名文件夹"}」吗？`)) deleteFolder(note.id);
                       } else {
-                        if (confirm(`确定删除「${note.title || "无标题"}」吗？`)) supabase.from("notes").delete().eq("id", note.id).then(() => setNotes((p) => p.filter((n) => n.id !== note.id)));
+                        if (confirm(`确定删除「${note.title || "无标题"}」吗？`)) removeNote(note);
                       }
                     }}
                       style={{ ...aBtn, color: T.deleteText }}
@@ -1121,10 +1175,14 @@ ${body}
           <button onClick={backToList} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 返回列表</button>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {themeBtn}
-            {activeNote.format !== "html" && (
+            {!["html", "pdf"].includes(activeNote.format) && (
               <button onClick={() => goToEdit(activeId)} style={{ padding: "5px 14px", background: T.btnBg, color: T.btnText, border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>编辑</button>
             )}
-            <button onClick={() => exportHtml(activeNote)} style={{ padding: "5px 14px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>导出 HTML</button>
+            {activeNote.format === "pdf" ? (
+              <button onClick={() => { const a = (activeNote.attachments || [])[0]; if (a) downloadAttachment(a); }} style={{ padding: "5px 14px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>下载 PDF</button>
+            ) : (
+              <button onClick={() => exportHtml(activeNote)} style={{ padding: "5px 14px", background: T.card, color: T.textSub, border: `1px solid ${T.borderInput}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>导出 HTML</button>
+            )}
             <button onClick={deleteNote} style={{ padding: "5px 14px", background: T.deleteBg, color: T.deleteText, border: `1px solid ${T.deleteBorder}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif" }}>删除</button>
           </div>
         </div>
@@ -1163,7 +1221,9 @@ ${body}
         <div style={{ display: "flex", gap: 16, fontSize: 13, color: T.textMuted, paddingBottom: 20, borderBottom: `1px solid ${T.border}`, flexWrap: "wrap" }}>
           <span>📅 {fmtDate(activeNote.created_at)}</span>
           <span>✏️ {fmtDate(activeNote.updated_at)}</span>
-          {activeNote.format === "html" ? (
+          {activeNote.format === "pdf" ? (
+            <span>📕 PDF 文档（只读）</span>
+          ) : activeNote.format === "html" ? (
             <span>🌐 HTML 文档（只读）</span>
           ) : (
             <>
@@ -1174,7 +1234,22 @@ ${body}
         </div>
       </div>
 
-      {activeNote.format === "html" ? (
+      {activeNote.format === "pdf" ? (
+        // PDF 笔记：iframe 直连 Storage URL，浏览器原生 PDF 查看器渲染。
+        // 不加 sandbox —— Chrome 的 PDF 查看器在沙箱 iframe 中会被禁用。
+        // 部分环境（手机浏览器等）不支持 iframe 内联 PDF，提供新标签页打开的兜底入口。
+        <div style={{ padding: "0 0 20px" }}>
+          <div style={{ padding: "8px 24px", fontSize: 12, color: T.textMuted, display: "flex", gap: 12, alignItems: "center" }}>
+            <span>📕 {((activeNote.attachments || [])[0] || {}).name || "PDF"}</span>
+            <a href={(activeNote.attachments || [])[0]?.url} target="_blank" rel="noreferrer" style={{ color: dark ? "#60a5fa" : "#4338ca" }}>在新标签页打开 ↗</a>
+            <span style={{ color: T.textPlaceholder }}>（若下方未显示预览，请用此链接或「下载 PDF」）</span>
+          </div>
+          <iframe
+            title={activeNote.title || "PDF 文档"}
+            src={(activeNote.attachments || [])[0]?.url}
+            style={{ width: "100%", height: "calc(100vh - 260px)", minHeight: 400, border: "none", background: "#fff" }} />
+        </div>
+      ) : activeNote.format === "html" ? (
         // HTML 笔记：iframe 沙箱隔离渲染，原样保留页面自带样式。
         // sandbox 开 allow-scripts 但不开 allow-same-origin —— 脚本能跑，却访问不到父页/Supabase 会话，XSS 被隔离在 iframe 内。
         <div style={{ padding: "0 0 20px" }}>
