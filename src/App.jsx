@@ -843,7 +843,7 @@ ${body}
                 return (
                   <button key={t} onClick={() => setFilterTag(filterTag === t ? null : t)}
                     draggable
-                    onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragTag(t); }}
+                    onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", t); setDragTag(t); }}
                     onDragOver={(e) => { if (dragTag && dragTag !== t) { e.preventDefault(); setDragOverTag(t); } }}
                     onDrop={() => dropTagOn(t)}
                     onDragEnd={() => { setDragTag(null); setDragOverTag(null); }}
@@ -924,7 +924,7 @@ ${body}
               return (
                 <div key={note.id} className="card-anim"
                   draggable={draggableDoc}
-                  onDragStart={draggableDoc ? (e) => { e.dataTransfer.effectAllowed = "move"; setDragId(note.id); } : undefined}
+                  onDragStart={draggableDoc ? (e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", note.id); setDragId(note.id); } : undefined}
                   onDragOver={draggableDoc ? (e) => { if (dragId && dragId !== note.id) { e.preventDefault(); setDragOverId(note.id); } } : undefined}
                   onDrop={draggableDoc ? () => dropNoteOn(note.id) : undefined}
                   onDragEnd={draggableDoc ? () => { setDragId(null); setDragOverId(null); } : undefined}
