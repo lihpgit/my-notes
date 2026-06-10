@@ -513,7 +513,24 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     for (const file of files) {
       // 每条笔记的公共字段
       const base = { id: genId(), tags: [], scripts: [], attachments: [], is_folder: false, parent_id: currentFolder || null, banner: Math.floor(Math.random() * BANNERS.length), created_at: Date.now(), updated_at: Date.now(), user_id: user.id };
-      if (/\.pdf$/i.test(file.name)) {
+      // 按扩展名初判类型；.doc 额外按文件头嗅探 —— 不少工具导出的 ".doc" 实为 docx(zip) 或 HTML 换皮，
+      // 只有真正的旧版二进制 .doc(OLE2) 才无法在浏览器解析
+      let kind;
+      if (/\.pdf$/i.test(file.name)) kind = "pdf";
+      else if (/\.docx$/i.test(file.name)) kind = "docx";
+      else if (/\.doc$/i.test(file.name)) {
+        const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+        const headText = String.fromCharCode(...head).trimStart();
+        if (head[0] === 0x50 && head[1] === 0x4b) kind = "docx"; // PK → zip，实为 OOXML
+        else if (headText.startsWith("<")) kind = "html"; // HTML 伪装的 .doc
+        else {
+          alert(`「${file.name}」是旧版二进制 .doc 格式，浏览器无法解析。建议在企业微信中导出为 .docx 或 PDF 后再导入。`);
+          continue;
+        }
+      }
+      else if (/\.(html?|htm)$/i.test(file.name)) kind = "html";
+      else kind = "md";
+      if (kind === "pdf") {
         // PDF：原文件传 Storage，笔记只存引用；文件记录放进笔记自身 attachments，
         // 这样 deleteNote/deleteFolder/removeNote 的清理逻辑直接覆盖
         if (file.size > MAX_ATT_SIZE) { alert(`「${file.name}」超过 20MB，请压缩后再导入`); continue; }
@@ -522,13 +539,28 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
         if (error) { alert(`上传「${file.name}」失败：${error.message}`); continue; }
         const url = supabase.storage.from(ATT_BUCKET).getPublicUrl(path).data.publicUrl;
         newNotes.push({ ...base, title: file.name.replace(/\.pdf$/i, ""), content: "", format: "pdf", attachments: [{ name: file.name, type: "application/pdf", path, url }] });
-      } else if (/\.docx$/i.test(file.name)) {
-        // Word：mammoth 纯前端转 HTML（图片默认内联为 base64 data URI），走现有 html 只读管线
+      } else if (kind === "docx") {
+        // Word：mammoth 纯前端转 HTML，走现有 html 只读管线。
+        // 内嵌图片不做 base64 内联（企微文档截图多，会把笔记撑到数 MB 拖慢全量加载），
+        // 而是逐张上传 Storage、HTML 里引 URL；图片记录挂进笔记 attachments，删除时自动清理
+        const title = file.name.replace(/\.docx?$/i, "");
+        const uploadedImgs = [];
         try {
           const m = await import("mammoth");
           const mammoth = m.default || m;
-          const { value: bodyHtml } = await mammoth.convertToHtml({ arrayBuffer: await file.arrayBuffer() });
-          const title = file.name.replace(/\.docx$/i, "");
+          const convertImage = mammoth.images.imgElement(async (image) => {
+            const b64 = await image.read("base64");
+            const contentType = image.contentType || "image/png";
+            const ext = (contentType.split("/")[1] || "png").replace("jpeg", "jpg");
+            const path = `${user.id}/${genId()}.${ext}`;
+            const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+            const { error } = await supabase.storage.from(ATT_BUCKET).upload(path, new Blob([bytes], { type: contentType }), { contentType, upsert: false });
+            if (error) throw new Error("内嵌图片上传失败：" + error.message);
+            const url = supabase.storage.from(ATT_BUCKET).getPublicUrl(path).data.publicUrl;
+            uploadedImgs.push({ name: `${title}-img${uploadedImgs.length + 1}.${ext}`, type: contentType, path, url });
+            return { src: url };
+          });
+          const { value: bodyHtml } = await mammoth.convertToHtml({ arrayBuffer: await file.arrayBuffer() }, { convertImage });
           const safeTitle = title.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
           const html = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>${safeTitle}</title>
@@ -537,22 +569,21 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
           if (html.length > 2 * 1024 * 1024) {
             alert(`「${file.name}」转换后约 ${(html.length / 1024 / 1024).toFixed(1)}MB（多为内嵌图片），可能超过云端单条上限导致保存失败。`);
           }
-          newNotes.push({ ...base, title, content: html, format: "html" });
+          newNotes.push({ ...base, title, content: html, format: "html", attachments: uploadedImgs });
         } catch (err) {
+          // 转换失败时回滚已上传的图片，避免 Storage 留下孤儿文件
+          if (uploadedImgs.length) await supabase.storage.from(ATT_BUCKET).remove(uploadedImgs.map((i) => i.path));
           alert(`解析「${file.name}」失败：${err.message || err}`);
           continue;
         }
-      } else if (/\.doc$/i.test(file.name)) {
-        alert(`「${file.name}」是旧版 .doc 格式，暂不支持。请在企业微信中导出为 .docx 后再导入。`);
-        continue;
-      } else if (/\.(html?|htm)$/i.test(file.name)) {
+      } else if (kind === "html") {
         // HTML 导入：原文存入 content，标记 format=html（只读，iframe 隔离渲染）
         const text = await file.text();
         if (text.length > 2 * 1024 * 1024) {
           alert(`「${file.name}」体积约 ${(text.length / 1024 / 1024).toFixed(1)}MB，可能超过云端单条上限导致导入失败。建议精简后再试。`);
         }
         const tm = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-        const title = (tm && tm[1].trim()) || file.name.replace(/\.(html?|htm)$/i, "");
+        const title = (tm && tm[1].trim()) || file.name.replace(/\.(html?|htm|doc)$/i, "");
         newNotes.push({ ...base, title, content: text, format: "html" });
       } else {
         const text = await file.text();
