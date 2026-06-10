@@ -341,17 +341,10 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   // 正在拖拽的是否是文件夹（用于只高亮同类型的放置目标）
   const dragIsFolder = dragId ? !!(notes.find((n) => n.id === dragId) || {}).is_folder : null;
 
-  /* 拖拽放下：把 dragId 插到 targetId 的位置（文档对文档、文件夹对文件夹），对该组重新编号并持久化 */
-  function dropNoteOn(targetId) {
-    const from = dragId;
-    setDragId(null); setDragOverId(null);
-    if (!from || from === targetId) return;
-    const src = notes.find((n) => n.id === from);
-    const dst = notes.find((n) => n.id === targetId);
-    if (!src || !dst || !!src.is_folder !== !!dst.is_folder) return; // 文档与文件夹不互为放置目标
-    const group = filtered.filter((n) => !!n.is_folder === !!src.is_folder);
-    const fi = group.findIndex((n) => n.id === from);
-    const ti = group.findIndex((n) => n.id === targetId);
+  /* 把 fromId 插到组内 toId 的位置，对整组重新编号(0..n-1)并持久化 */
+  function commitReorder(group, fromId, toId) {
+    const fi = group.findIndex((n) => n.id === fromId);
+    const ti = group.findIndex((n) => n.id === toId);
     if (fi < 0 || ti < 0) return;
     const arr = [...group];
     const [moved] = arr.splice(fi, 1);
@@ -369,6 +362,37 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
         if (error) alert("排序保存失败：" + error.message + "\n（若提示 sort_order 不存在，需先在 Supabase 执行 alter table notes add column sort_order double precision;）");
       });
     }
+  }
+
+  /* 主列表拖拽放下：文档对文档、文件夹对文件夹，组取当前视图的同类行 */
+  function dropNoteOn(targetId) {
+    const from = dragId;
+    setDragId(null); setDragOverId(null);
+    if (!from || from === targetId) return;
+    const src = notes.find((n) => n.id === from);
+    const dst = notes.find((n) => n.id === targetId);
+    if (!src || !dst || !!src.is_folder !== !!dst.is_folder) return; // 文档与文件夹不互为放置目标
+    commitReorder(filtered.filter((n) => !!n.is_folder === !!src.is_folder), from, targetId);
+  }
+
+  /* 侧边栏树拖拽放下：仅同一父级下的文件夹之间排序，跨级忽略 */
+  function dropTreeFolderOn(targetId) {
+    const from = dragId;
+    setDragId(null); setDragOverId(null);
+    if (!from || from === targetId) return;
+    const src = notes.find((n) => n.id === from);
+    const dst = notes.find((n) => n.id === targetId);
+    if (!src || !dst || !src.is_folder || !dst.is_folder) return;
+    if (parentOf(src) !== parentOf(dst)) return; // 仅同级
+    const siblings = notes.filter((n) => n.is_folder && parentOf(n) === parentOf(src)).sort(folderCmp);
+    commitReorder(siblings, from, targetId);
+  }
+
+  // 侧边栏树的放置目标校验：被拖的是文件夹且与目标同级
+  function canTreeDropOn(dstNode) {
+    if (!dragId || dragId === dstNode.id) return false;
+    const src = notes.find((n) => n.id === dragId);
+    return !!(src && src.is_folder && parentOf(src) === parentOf(dstNode));
   }
 
   /* 拖拽标签放下：调整本机标签顺序并写回 localStorage */
@@ -818,7 +842,12 @@ ${body}
     return (
       <>
         <div
-          style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 8px", paddingLeft: 8 + depth * 14, borderRadius: 6, cursor: "pointer", background: isActive ? T.activeFilter : "transparent", transition: "background .12s", fontSize: 13, color: isActive ? T.text : T.textSub, fontWeight: isActive ? 600 : 400, minWidth: 0 }}
+          draggable
+          onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", node.id); setDragId(node.id); }}
+          onDragOver={(e) => { if (canTreeDropOn(node)) { e.preventDefault(); setDragOverId(node.id); } }}
+          onDrop={() => dropTreeFolderOn(node.id)}
+          onDragEnd={() => { setDragId(null); setDragOverId(null); }}
+          style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 8px", paddingLeft: 8 + depth * 14, borderRadius: 6, cursor: "pointer", background: isActive ? T.activeFilter : "transparent", transition: "background .12s", fontSize: 13, color: isActive ? T.text : T.textSub, fontWeight: isActive ? 600 : 400, minWidth: 0, opacity: dragId === node.id ? .4 : 1, boxShadow: dragOverId === node.id && dragId !== node.id ? `inset 0 2px 0 ${dark ? "#60a5fa" : "#6366f1"}` : "none" }}
           onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = T.listHover; }}
           onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
           onClick={() => navToFolder(node.id)}>
