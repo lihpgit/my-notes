@@ -54,11 +54,19 @@ function buildFolderTree(notes) {
     else roots.push(map[f.id]);
   });
   const sortRec = (arr) => {
-    arr.sort((a, b) => (a.title || "").localeCompare(b.title || "", "zh"));
+    arr.sort(folderCmp);
     arr.forEach((n) => sortRec(n.children));
   };
   sortRec(roots);
   return roots;
+}
+
+// 文件夹排序：手动顺序(sort_order)优先升序，未拖过的(null)按名称排前
+function folderCmp(a, b) {
+  const an = a.sort_order == null, bn = b.sort_order == null;
+  if (an && bn) return (a.title || "").localeCompare(b.title || "", "zh");
+  if (an !== bn) return an ? -1 : 1;
+  return a.sort_order - b.sort_order;
 }
 
 // 沿 parent_id 链向上找祖先文件夹（遇到非文件夹即停止）
@@ -303,9 +311,9 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       r = notes.filter((n) => (n.parent_id && folderSet.has(n.parent_id) ? n.parent_id : null) === currentFolder);
     }
     if (filterTag) r = r.filter((n) => (n.tags || []).includes(filterTag));
-    // 文件夹排前（按名称），笔记排后：有手动排序(sort_order)按它升序，
+    // 文件夹排前（手动顺序优先，未拖过的按名称），笔记排后：有手动排序(sort_order)按它升序，
     // 未排序的(null)视为最新置顶、按更新时间降序 —— 兼容老数据且新建文档仍出现在顶部
-    const fs = r.filter((n) => n.is_folder).sort((a, b) => (a.title || "").localeCompare(b.title || "", "zh"));
+    const fs = r.filter((n) => n.is_folder).sort(folderCmp);
     const ds = r.filter((n) => !n.is_folder).sort((a, b) => {
       const an = a.sort_order == null, bn = b.sort_order == null;
       if (an && bn) return (b.updated_at || 0) - (a.updated_at || 0);
@@ -328,19 +336,24 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     return [...known, ...rest];
   }, [allTags, tagOrder]);
 
-  // 仅在默认浏览（无搜索、无标签筛选）时允许拖拽文档排序，避免对子集重排的歧义
-  const canDragDocs = !search && !filterTag;
+  // 仅在默认浏览（无搜索、无标签筛选）时允许拖拽排序，避免对子集重排的歧义
+  const canDragRows = !search && !filterTag;
+  // 正在拖拽的是否是文件夹（用于只高亮同类型的放置目标）
+  const dragIsFolder = dragId ? !!(notes.find((n) => n.id === dragId) || {}).is_folder : null;
 
-  /* 拖拽文档放下：把 dragId 插到 targetId 的位置，对当前列表的文档重新编号并持久化 */
+  /* 拖拽放下：把 dragId 插到 targetId 的位置（文档对文档、文件夹对文件夹），对该组重新编号并持久化 */
   function dropNoteOn(targetId) {
     const from = dragId;
     setDragId(null); setDragOverId(null);
     if (!from || from === targetId) return;
-    const docs = filtered.filter((n) => !n.is_folder);
-    const fi = docs.findIndex((n) => n.id === from);
-    const ti = docs.findIndex((n) => n.id === targetId);
+    const src = notes.find((n) => n.id === from);
+    const dst = notes.find((n) => n.id === targetId);
+    if (!src || !dst || !!src.is_folder !== !!dst.is_folder) return; // 文档与文件夹不互为放置目标
+    const group = filtered.filter((n) => !!n.is_folder === !!src.is_folder);
+    const fi = group.findIndex((n) => n.id === from);
+    const ti = group.findIndex((n) => n.id === targetId);
     if (fi < 0 || ti < 0) return;
-    const arr = [...docs];
+    const arr = [...group];
     const [moved] = arr.splice(fi, 1);
     arr.splice(ti, 0, moved);
     const orderMap = new Map(arr.map((n, i) => [n.id, i]));
@@ -920,14 +933,13 @@ ${body}
               // 递归统计文件夹内全部后代数量（删除确认用）
               const descCount = isFolder ? (() => { let c = 0; const col = (id) => notes.filter((n) => n.parent_id === id).forEach((n) => { c++; col(n.id); }); col(note.id); return c; })() : 0;
               const aBtn = { padding: "6px 10px", fontSize: 12, background: "none", border: "1px solid transparent", borderRadius: 6, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s", opacity: .6 };
-              const draggableDoc = canDragDocs && !isFolder;
               return (
                 <div key={note.id} className="card-anim"
-                  draggable={draggableDoc}
-                  onDragStart={draggableDoc ? (e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", note.id); setDragId(note.id); } : undefined}
-                  onDragOver={draggableDoc ? (e) => { if (dragId && dragId !== note.id) { e.preventDefault(); setDragOverId(note.id); } } : undefined}
-                  onDrop={draggableDoc ? () => dropNoteOn(note.id) : undefined}
-                  onDragEnd={draggableDoc ? () => { setDragId(null); setDragOverId(null); } : undefined}
+                  draggable={canDragRows}
+                  onDragStart={canDragRows ? (e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", note.id); setDragId(note.id); } : undefined}
+                  onDragOver={canDragRows ? (e) => { if (dragId && dragId !== note.id && dragIsFolder === !!isFolder) { e.preventDefault(); setDragOverId(note.id); } } : undefined}
+                  onDrop={canDragRows ? () => dropNoteOn(note.id) : undefined}
+                  onDragEnd={canDragRows ? () => { setDragId(null); setDragOverId(null); } : undefined}
                   style={{ display: "flex", alignItems: "center", borderBottom: i < filtered.length - 1 ? `1px solid ${T.borderLight}` : "none", animationDelay: i * .04 + "s", transition: "background .15s", opacity: dragId === note.id ? .4 : 1, boxShadow: dragOverId === note.id && dragId !== note.id ? `inset 0 2px 0 ${dark ? "#60a5fa" : "#6366f1"}` : "none" }}
                   onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
                   onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
