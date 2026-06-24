@@ -117,6 +117,20 @@ function getAncestors(notes, startParentId) {
   return path;
 }
 
+// HTML 笔记在沙箱 iframe（无 allow-same-origin）里渲染，访问 localStorage/sessionStorage 会抛 SecurityError，
+// 导致页面自带脚本（目录折叠、字号记忆等）从读 storage 那一行起整段崩溃。这里在 srcDoc 最前面注入一段内存版
+// storage 垫片，让这类调用不再抛异常，从而保留沙箱隔离的同时让页面正常工作。
+const STORAGE_SHIM = `<script>(function(){function mk(){var m=Object.create(null);return{getItem:function(k){k=String(k);return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null},setItem:function(k,v){m[String(k)]=String(v)},removeItem:function(k){delete m[String(k)]},clear:function(){m=Object.create(null)},key:function(i){var a=Object.keys(m);return i>=0&&i<a.length?a[i]:null},get length(){return Object.keys(m).length}}}function inst(n){try{void window[n].length;return}catch(e){}try{Object.defineProperty(window,n,{value:mk(),configurable:true})}catch(e){}}inst('localStorage');inst('sessionStorage')})();</script>`;
+
+function withStorageShim(html) {
+  const src = html || "";
+  const head = src.match(/<head[^>]*>/i);
+  if (head) return src.slice(0, head.index + head[0].length) + STORAGE_SHIM + src.slice(head.index + head[0].length);
+  const htmlTag = src.match(/<html[^>]*>/i);
+  if (htmlTag) return src.slice(0, htmlTag.index + htmlTag[0].length) + STORAGE_SHIM + src.slice(htmlTag.index + htmlTag[0].length);
+  return STORAGE_SHIM + src;
+}
+
 const LIGHT = {
   bg: "#f8f9fa", card: "#fff", text: "#1a1a1a", textSub: "#666", textMuted: "#999", textFaint: "#aaa", textPlaceholder: "#bbb", textTag: "#ccc",
   border: "#eee", borderLight: "#f0f0f0", borderInput: "#e0e0e0", borderDashed: "#ddd",
@@ -1431,7 +1445,7 @@ ${body}
         <div style={{ padding: "0 0 20px" }}>
           <iframe
             title={activeNote.title || "HTML 笔记"}
-            srcDoc={activeNote.content || ""}
+            srcDoc={withStorageShim(activeNote.content)}
             sandbox="allow-scripts allow-popups allow-forms"
             style={{ width: "100%", height: "calc(100vh - 230px)", minHeight: 400, border: "none", background: "#fff" }} />
         </div>
