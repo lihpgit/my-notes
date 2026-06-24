@@ -1,6 +1,6 @@
 # 拾光笔记 - 项目完整文档
 
-> 最近核对时间：2026-06-10（对照 src/App.jsx 与 git 历史全面更新）
+> 最近核对时间：2026-06-24（新增 PDF/Word/MHTML 导入、图片压缩，对照 src/App.jsx 与 git 历史更新）
 
 ## 项目概述
 
@@ -23,6 +23,7 @@
 | Vite | 构建工具 | 8.x（package.json: ^8.0.10） |
 | Supabase JS | 数据库 + 认证 + 存储客户端 | @supabase/supabase-js ^2.105.4 |
 | marked | Markdown 渲染 | ^18.0.3 |
+| mammoth | Word .docx → HTML 转换（动态 import） | package.json 依赖 |
 | Vercel | 静态托管 + 自动部署 | - |
 
 ---
@@ -39,7 +40,7 @@ my-notes/
 │   └── icons.svg
 └── src/
     ├── main.jsx          # 入口文件
-    ├── App.jsx           # 主应用（约 1400 行，包含所有页面和逻辑）
+    ├── App.jsx           # 主应用（约 1650 行，包含所有页面和逻辑）
     ├── supabase.js       # Supabase 客户端配置（URL + anon key 硬编码在此）
     ├── App.css / index.css / assets/  # 脚手架遗留，实际样式写在 App.jsx 内联
 ```
@@ -82,7 +83,7 @@ create table notes (
   is_folder boolean default false,                           -- true = 文件夹（纯容器）
   scripts jsonb default '[]',                                -- 内嵌脚本数组 [{name, content}]
   attachments jsonb default '[]',                            -- 附件数组 [{name, type, path, url}]
-  format text default 'md',                                  -- 'md' | 'html'（HTML 笔记只读）
+  format text default 'md',                                  -- 'md' | 'html' | 'pdf'（html/pdf 笔记只读）
   sort_order double precision                                -- 手动拖拽排序序号，null = 未排序（按更新时间倒序置顶）
 );
 
@@ -126,7 +127,7 @@ create policy "用户只能删除自己的笔记"
 
 1. **登录页（AuthPage）**：邮箱密码登录/注册
 2. **列表页（view="list"）**：左侧文件夹目录树 + 标签筛选，右侧面包屑 + 文档列表，支持搜索、拖拽排序、导入导出
-3. **阅读页（view="read"）**：博客风格文章展示，Markdown 渲染；HTML 笔记用 sandbox iframe 隔离渲染（只读）
+3. **阅读页（view="read"）**：博客风格文章展示，Markdown 渲染；HTML 笔记用 sandbox iframe 隔离渲染（只读）；PDF 笔记用 iframe 直接预览（只读，附「在新标签页打开」兜底链接）
 4. **编辑页（view="edit"）**：左右分屏，左 Markdown 编辑 + 右实时预览；支持标签、脚本、附件管理
 
 虽然没有路由，但已通过 `history.pushState` / `popstate` 接管浏览器返回键，前进/后退可在视图间正常切换（仍无法通过 URL 直达某篇文章）。
@@ -134,11 +135,17 @@ create policy "用户只能删除自己的笔记"
 ### 已实现功能清单
 
 - **文档目录树**（Confluence 式）：文件夹作为独立实体（纯容器），侧边栏树形导航、展开/折叠、面包屑导航、移动文档/文件夹（防止移入自己的子树）、递归删除
-- **拖拽排序**：首页文档列表可拖拽排序（`sort_order` 持久化到云端，仅在无搜索/无标签筛选时可拖）；侧边栏标签可拖拽排序（仅 localStorage 本机持久化）
+- **拖拽排序**：首页文档列表可拖拽排序（`sort_order` 持久化到云端，仅在无搜索/无标签筛选时可拖）；侧边栏目录树的文件夹也可拖拽排序（同一父级下，`sort_order` 持久化）；侧边栏标签可拖拽排序（仅 localStorage 本机持久化）。原生 HTML5 DnD，零依赖；dragstart 已补 `dataTransfer.setData` 兼容 Firefox
 - **自定义标签**：编辑页输入新标签回车即建；标签从笔记聚合派生，云端无独立实体；8 个老标签有预设配色，其余用灰色兜底
 - **暗黑模式**：🌙/☀️ 一键切换，localStorage 持久化，全套深色配色（含标签深色配色 TAG_COLORS_DARK）
-- **导入**：支持 .md / .markdown / .txt / .html / .htm，可批量；Markdown 自动提取一级标题作为笔记标题；HTML 原文入库并标记 `format='html'`（只读，超 2MB 给出体积警告）
+- **导入**：支持 .md / .markdown / .txt / .html / .htm / .pdf / .docx / .doc，可批量。导入逻辑（`importMd`）按文件头嗅探真实类型（`kind`）：
+  - **md / txt**：Markdown 入库，自动提取一级标题作为笔记标题
+  - **html / htm**：HTML 原文入库标记 `format='html'`（只读，超 2MB 给出体积警告）；内嵌 base64 图片 >12KB 的会被抽出、压缩为 WebP 上传 Storage 并替换为 URL，小图标保留内联
+  - **pdf**：上传 Storage，`format='pdf'`，阅读页 iframe 预览（只读）
+  - **docx**：用 mammoth.js 转 HTML（只读、可搜索），内嵌图片改传 Storage 并压缩
+  - **doc**：按文件头区分——`PK` 头当 docx、`<` 头当 html、MIME 头（Confluence「导出 Word」实为 MHTML）走 MHTML 解析器（quoted-printable + base64 解码），旧版二进制 .doc 才提示不支持
 - **导出**：Markdown 笔记可导出 .md 或渲染后的独立 .html；HTML 笔记直接导出原文
+- **图片压缩**（`compressImageBlob`）：所有上传图片路径（docx / MHTML / HTML 导入内嵌图 / 编辑器手动附件）统一压缩为 WebP、限宽 1920px、质量 0.82；压缩后 ≥ 原图 90% 则保留原图；跳过 gif/svg；解码失败按原图上传。转换后文件名改 .webp
 - **内嵌脚本**：编辑时上传脚本文件或弹窗手写脚本（选后缀），在光标处插入 `{{script:文件名}}` 标记，阅读时点击下载
 - **附件（Supabase Storage）**：上传到 `attachments` bucket，光标处插入 `{{file:文件名}}` 标记；图片附件在阅读页内联显示（点击看大图），其他类型为下载链接；删除附件/笔记时同步清理 Storage
 - **搜索**：跨目录全局搜索笔记标题+正文（不含文件夹）
@@ -238,7 +245,7 @@ npm run dev
 
 ## 当前已知问题 & 待优化
 
-1. **所有代码在单文件 App.jsx 中**（约 1400 行）：应拆分为多个组件文件（AuthPage、NoteList、NoteReader、NoteEditor、TreeNode 等）
+1. **所有代码在单文件 App.jsx 中**（约 1650 行）：应拆分为多个组件文件（AuthPage、NoteList、NoteReader、NoteEditor、TreeNode 等）
 2. **样式全部内联**：应迁移到 CSS Modules 或 Tailwind CSS
 3. **无真正的路由**：已支持浏览器返回键（history 状态管理），但仍无法通过 URL 直接访问某篇文章，刷新后回到列表页。应引入 react-router
 4. **编辑页移动端体验差**：列表页已做窄屏适配，但编辑页左右分屏仍是固定 1fr 1fr，手机上很挤
@@ -249,6 +256,8 @@ npm run dev
 9. **附件 bucket 为公开访问**：知道 URL 即可访问文件，应改为私有 bucket + signed URL
 10. **HTML 笔记体积风险**：HTML 原文整篇存入 content 字段，超大文件（>2MB）可能触发 Supabase 单条上限，目前只有前端警告
 11. **拖拽排序整批 upsert**：对当前列表所有文档重新编号后整批写库，多端同时操作可能互相覆盖
+12. **图片压缩只对新导入生效**：旧版本已上传的笔记不会自动压缩，需删除后重新导入才能享受压缩（用户已知悉）
+13. **旧版二进制 .doc 不支持**：只支持 docx / MHTML（Confluence 导出 Word）；真正的旧版二进制 .doc 会提示不支持，需先用 Office 另存为 .docx
 
 ---
 
@@ -262,6 +271,8 @@ npm run dev
 - [x] 自定义标签
 - [x] 文章导出为 .md 文件（另支持导出 .html）
 - [x] 导入 .md / .txt / .html（HTML 只读）
+- [x] 导入 .pdf / .docx / .doc（企业微信导出 PDF/Word、Confluence 导出 Word 即 MHTML）
+- [x] 上传图片自动压缩为 WebP、限宽 1920px（覆盖全部上传路径）
 - [x] 文章排序（首页拖拽排序 + 标签拖拽排序）
 - [x] 浏览器返回键响应
 - [x] 列表页移动端/窄屏适配
@@ -308,7 +319,7 @@ npm run dev
 当你在 Claude Code 中使用此项目时：
 
 1. 项目根目录是 `my-notes`
-2. 主要修改的文件是 `src/App.jsx`（约 1400 行单文件）和 `src/supabase.js`
+2. 主要修改的文件是 `src/App.jsx`（约 1650 行单文件）和 `src/supabase.js`
 3. 数据库变更需要在 Supabase SQL Editor 中手动执行，Claude Code 无法直接操作；改完后记得同步更新本文档的表结构
 4. 推送代码后 Vercel 自动部署，不需要额外操作
 5. 如果需要安装新的 npm 包，使用 `npm install 包名`
