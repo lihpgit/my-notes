@@ -122,13 +122,19 @@ function getAncestors(notes, startParentId) {
 // storage 垫片，让这类调用不再抛异常，从而保留沙箱隔离的同时让页面正常工作。
 const STORAGE_SHIM = `<script>(function(){function mk(){var m=Object.create(null);return{getItem:function(k){k=String(k);return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null},setItem:function(k,v){m[String(k)]=String(v)},removeItem:function(k){delete m[String(k)]},clear:function(){m=Object.create(null)},key:function(i){var a=Object.keys(m);return i>=0&&i<a.length?a[i]:null},get length(){return Object.keys(m).length}}}function inst(n){try{void window[n].length;return}catch(e){}try{Object.defineProperty(window,n,{value:mk(),configurable:true})}catch(e){}}inst('localStorage');inst('sessionStorage')})();</script>`;
 
+// 把 iframe 内文档的滚动位置实时回传父页，父页据此折叠/展开外层的面包屑+横幅+元信息，
+// 给正文腾出空间。iframe 自身仍是定长内部滚动，文档自带的固定目录/字号控件不受影响。
+const SCROLL_REPORTER = `<script>(function(){var last=-1;function post(){var y=window.scrollY||document.documentElement.scrollTop||0;if(y!==last){last=y;try{parent.postMessage({__notesScrollY:y},'*')}catch(e){}}}window.addEventListener('scroll',post,{passive:true});window.addEventListener('load',post)})();</script>`;
+
+const IFRAME_INJECT = STORAGE_SHIM + SCROLL_REPORTER;
+
 function withStorageShim(html) {
   const src = html || "";
   const head = src.match(/<head[^>]*>/i);
-  if (head) return src.slice(0, head.index + head[0].length) + STORAGE_SHIM + src.slice(head.index + head[0].length);
+  if (head) return src.slice(0, head.index + head[0].length) + IFRAME_INJECT + src.slice(head.index + head[0].length);
   const htmlTag = src.match(/<html[^>]*>/i);
-  if (htmlTag) return src.slice(0, htmlTag.index + htmlTag[0].length) + STORAGE_SHIM + src.slice(htmlTag.index + htmlTag[0].length);
-  return STORAGE_SHIM + src;
+  if (htmlTag) return src.slice(0, htmlTag.index + htmlTag[0].length) + IFRAME_INJECT + src.slice(htmlTag.index + htmlTag[0].length);
+  return IFRAME_INJECT + src;
 }
 
 const LIGHT = {
@@ -251,6 +257,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [dragOverId, setDragOverId] = useState(null); // 拖拽悬停的目标文档 id
   const [dragTag, setDragTag] = useState(null); // 正在拖拽的标签
   const [dragOverTag, setDragOverTag] = useState(null); // 拖拽悬停的目标标签
+  const [htmlScrolled, setHtmlScrolled] = useState(false); // HTML 笔记 iframe 已下滚 → 折叠外层横幅腾出空间
   // 标签显示顺序（仅本机持久化；标签是从笔记聚合的派生数据，云端无实体）
   const [tagOrder, setTagOrder] = useState(() => {
     try { return JSON.parse(localStorage.getItem("tagOrder:" + user.id)) || []; } catch { return []; }
@@ -265,6 +272,18 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  // HTML 笔记：接收 iframe 回传的滚动位置，下滚超阈值则折叠外层横幅
+  useEffect(() => {
+    const onMsg = (e) => {
+      const d = e.data;
+      if (d && typeof d.__notesScrollY === "number") setHtmlScrolled(d.__notesScrollY > 40);
+    };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
+  // 切换笔记时复位折叠状态
+  useEffect(() => { setHtmlScrolled(false); }, [activeId]);
 
   // 点击空白处关闭导出格式菜单
   useEffect(() => {
@@ -1378,6 +1397,8 @@ ${body}
         </div>
       </header>
 
+      {/* 面包屑 + 横幅 + 元信息：HTML 笔记下滚时折叠，给正文腾空间 */}
+      <div style={{ maxHeight: htmlScrolled ? 0 : 500, opacity: htmlScrolled ? 0 : 1, overflow: "hidden", transition: "max-height .3s ease, opacity .2s ease" }}>
       {/* 面包屑 */}
       {(readAncestors.length > 0 || activeNote.parent_id) && (
         <div style={{ padding: "8px 24px", fontSize: 12, color: T.textMuted, background: T.card, borderBottom: `1px solid ${T.borderLight}`, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
@@ -1423,6 +1444,7 @@ ${body}
           )}
         </div>
       </div>
+      </div>
 
       {activeNote.format === "pdf" ? (
         // PDF 笔记：iframe 直连 Storage URL，浏览器原生 PDF 查看器渲染。
@@ -1447,7 +1469,7 @@ ${body}
             title={activeNote.title || "HTML 笔记"}
             srcDoc={withStorageShim(activeNote.content)}
             sandbox="allow-scripts allow-popups allow-forms"
-            style={{ width: "100%", height: "calc(100vh - 230px)", minHeight: 400, border: "none", background: "#fff" }} />
+            style={{ width: "100%", height: htmlScrolled ? "calc(100vh - 48px)" : "calc(100vh - 230px)", minHeight: 400, border: "none", background: "#fff", transition: "height .3s ease" }} />
         </div>
       ) : (
       <div style={{ padding: "28px 24px 20px" }}>
