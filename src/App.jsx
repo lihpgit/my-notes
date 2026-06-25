@@ -5,26 +5,6 @@ import { marked } from "marked";
 marked.setOptions({ breaks: true, gfm: true });
 
 /* ───────── 常量 ───────── */
-const TAG_COLORS = {
-  Android: { bg: "#dcfce7", fg: "#166534" },
-  iOS: { bg: "#dbeafe", fg: "#1e40af" },
-  前端: { bg: "#ffedd5", fg: "#9a3412" },
-  后端: { bg: "#f3e8ff", fg: "#6b21a8" },
-  随笔: { bg: "#fce7f3", fg: "#9d174d" },
-  学习: { bg: "#ccfbf1", fg: "#115e59" },
-  工作: { bg: "#fef9c3", fg: "#854d0e" },
-  生活: { bg: "#f5f5f4", fg: "#44403c" },
-};
-const TAG_COLORS_DARK = {
-  Android: { bg: "#064e3b", fg: "#6ee7b7" },
-  iOS: { bg: "#1e3a5f", fg: "#93c5fd" },
-  前端: { bg: "#431407", fg: "#fdba74" },
-  后端: { bg: "#3b0764", fg: "#c4b5fd" },
-  随笔: { bg: "#500724", fg: "#f9a8d4" },
-  学习: { bg: "#042f2e", fg: "#5eead4" },
-  工作: { bg: "#422006", fg: "#fde047" },
-  生活: { bg: "#292524", fg: "#a8a29e" },
-};
 const BANNERS = [
   "linear-gradient(135deg,#667eea,#764ba2)",
   "linear-gradient(135deg,#f093fb,#f5576c)",
@@ -260,7 +240,6 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [notes, setNotes] = useState([]);
   const [view, setView] = useState("list");
   const [activeId, setActiveId] = useState(null);
-  const [filterTag, setFilterTag] = useState(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -274,16 +253,9 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [exportMenu, setExportMenu] = useState(null); // 导出格式选择菜单：当前笔记 id
   const [dragId, setDragId] = useState(null); // 正在拖拽的文档 id
   const [dragOverId, setDragOverId] = useState(null); // 拖拽悬停的目标文档 id
-  const [dragTag, setDragTag] = useState(null); // 正在拖拽的标签
-  const [dragOverTag, setDragOverTag] = useState(null); // 拖拽悬停的目标标签
   const [htmlScrolled, setHtmlScrolled] = useState(false); // HTML 笔记 iframe 已下滚 → 折叠外层横幅腾出空间
-  // 标签显示顺序（仅本机持久化；标签是从笔记聚合的派生数据，云端无实体）
-  const [tagOrder, setTagOrder] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("tagOrder:" + user.id)) || []; } catch { return []; }
-  });
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
-  const TC = dark ? TAG_COLORS_DARK : TAG_COLORS;
 
   // 响应式：窄屏（手机/小窗）时调整布局，保证标题始终可见
   useEffect(() => {
@@ -417,7 +389,6 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       // 非搜索：显示当前文件夹下的直接子项（文件夹 + 笔记）
       r = notes.filter((n) => (n.parent_id && folderSet.has(n.parent_id) ? n.parent_id : null) === currentFolder);
     }
-    if (filterTag) r = r.filter((n) => (n.tags || []).includes(filterTag));
     // 文件夹排前（手动顺序优先，未拖过的按名称），笔记排后：有手动排序(sort_order)按它升序，
     // 未排序的(null)视为最新置顶、按更新时间降序 —— 兼容老数据且新建文档仍出现在顶部
     const fs = r.filter((n) => n.is_folder).sort(folderCmp);
@@ -428,23 +399,10 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
       return a.sort_order - b.sort_order;
     });
     return [...fs, ...ds];
-  }, [notes, filterTag, search, currentFolder, folderSet]);
+  }, [notes, search, currentFolder, folderSet]);
 
-  const allTags = useMemo(() => {
-    const s = new Set();
-    notes.forEach((n) => (n.tags || []).forEach((t) => s.add(t)));
-    return [...s];
-  }, [notes]);
-
-  // 侧边栏标签按用户拖拽过的顺序显示；新出现的标签补在末尾，已消失的自动剔除
-  const orderedTags = useMemo(() => {
-    const known = tagOrder.filter((t) => allTags.includes(t));
-    const rest = allTags.filter((t) => !tagOrder.includes(t));
-    return [...known, ...rest];
-  }, [allTags, tagOrder]);
-
-  // 仅在默认浏览（无搜索、无标签筛选）时允许拖拽排序，避免对子集重排的歧义
-  const canDragRows = !search && !filterTag;
+  // 仅在默认浏览（无搜索）时允许拖拽排序，避免对子集重排的歧义
+  const canDragRows = !search;
   // 正在拖拽的是否是文件夹（用于只高亮同类型的放置目标）
   const dragIsFolder = dragId ? !!(notes.find((n) => n.id === dragId) || {}).is_folder : null;
 
@@ -500,20 +458,6 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     if (!dragId || dragId === dstNode.id) return false;
     const src = notes.find((n) => n.id === dragId);
     return !!(src && src.is_folder && parentOf(src) === parentOf(dstNode));
-  }
-
-  /* 拖拽标签放下：调整本机标签顺序并写回 localStorage */
-  function dropTagOn(target) {
-    const from = dragTag;
-    setDragTag(null); setDragOverTag(null);
-    if (!from || from === target) return;
-    const arr = [...orderedTags];
-    const fi = arr.indexOf(from), ti = arr.indexOf(target);
-    if (fi < 0 || ti < 0) return;
-    arr.splice(fi, 1);
-    arr.splice(ti, 0, from);
-    setTagOrder(arr);
-    try { localStorage.setItem("tagOrder:" + user.id, JSON.stringify(arr)); } catch { /* 存储不可用时仅本次会话生效 */ }
   }
 
   const save = useCallback((note) => {
@@ -1117,7 +1061,7 @@ ${body}
       </div>
 
       <div style={{ padding: narrow ? "16px 14px 60px" : "24px 24px 60px", display: "flex", flexDirection: narrow ? "column" : "row", gap: narrow ? 16 : 24 }}>
-        {/* ── 左侧：文档目录树 + 标签 ── */}
+        {/* ── 左侧：文档目录树 ── */}
         <aside style={{ width: narrow ? "100%" : 220, flexShrink: 0, position: narrow ? "static" : "sticky", top: 80, alignSelf: "flex-start", display: "flex", flexDirection: narrow ? "row" : "column", gap: 16, maxHeight: narrow ? 220 : "calc(100vh - 100px)", overflow: "auto" }}>
           {/* 目录树 */}
           <div style={{ background: T.sidebarBg, borderRadius: 10, padding: "12px", boxShadow: T.shadow, flex: narrow ? 1 : "none", minWidth: 0 }}>
@@ -1134,33 +1078,6 @@ ${body}
               </div>
               {folderTree.map((node) => <TreeNode key={node.id} node={node} />)}
               {folderTree.length === 0 && <p style={{ fontSize: 12, color: T.textTag, padding: "4px 8px" }}>暂无文件夹</p>}
-            </div>
-          </div>
-
-          {/* 标签过滤 */}
-          <div style={{ background: T.sidebarBg, borderRadius: 10, padding: "12px", boxShadow: T.shadow, flex: narrow ? 1 : "none", minWidth: 0 }}>
-            <h4 style={{ fontSize: 13, fontWeight: 600, color: T.textMuted, marginBottom: 8, padding: "0 4px" }}>🏷️ 标签</h4>
-            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              <button onClick={() => setFilterTag(null)}
-                style={{ textAlign: "left", padding: "5px 8px", borderRadius: 6, border: "none", background: !filterTag ? T.activeFilter : "transparent", color: !filterTag ? T.text : T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: !filterTag ? 600 : 400 }}>
-                全部 <span style={{ fontSize: 11, color: T.textPlaceholder, marginLeft: 4 }}>{notes.length}</span>
-              </button>
-              {orderedTags.map((t) => {
-                const c = TC[t] || { bg: dark ? "#27272a" : "#f5f5f5", fg: dark ? "#a1a1aa" : "#666" };
-                const count = notes.filter((n) => (n.tags || []).includes(t)).length;
-                return (
-                  <button key={t} onClick={() => setFilterTag(filterTag === t ? null : t)}
-                    draggable
-                    onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", t); setDragTag(t); }}
-                    onDragOver={(e) => { if (dragTag && dragTag !== t) { e.preventDefault(); setDragOverTag(t); } }}
-                    onDrop={() => dropTagOn(t)}
-                    onDragEnd={() => { setDragTag(null); setDragOverTag(null); }}
-                    style={{ textAlign: "left", padding: "5px 8px", borderRadius: 6, border: "none", background: filterTag === t ? c.bg : "transparent", color: filterTag === t ? c.fg : T.textSub, fontSize: 13, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", fontWeight: filterTag === t ? 600 : 400, opacity: dragTag === t ? .4 : 1, boxShadow: dragOverTag === t && dragTag !== t ? `inset 0 2px 0 ${dark ? "#60a5fa" : "#6366f1"}` : "none" }}>
-                    {t} <span style={{ fontSize: 11, color: T.textPlaceholder, marginLeft: 4 }}>{count}</span>
-                  </button>
-                );
-              })}
-              {allTags.length === 0 && <p style={{ fontSize: 12, color: T.textTag, padding: "4px 8px" }}>暂无标签</p>}
             </div>
           </div>
         </aside>
@@ -1214,7 +1131,7 @@ ${body}
           {filtered.length === 0 && (
             <div style={{ textAlign: "center", padding: "60px 0", color: T.textPlaceholder }}>
               <p style={{ fontSize: 48, marginBottom: 16 }}>{currentFolder ? "📂" : "📝"}</p>
-              <p>{search || filterTag ? "没有找到匹配的文章" : currentFolder ? "此文件夹为空，可「写文章」或「新建文件夹」" : "还没有内容，点击「写文章」或「新建文件夹」开始"}</p>
+              <p>{search ? "没有找到匹配的文章" : currentFolder ? "此文件夹为空，可「写文章」或「新建文件夹」" : "还没有内容，点击「写文章」或「新建文件夹」开始"}</p>
             </div>
           )}
 
@@ -1247,15 +1164,6 @@ ${body}
                         <span style={{ fontSize: 14, flexShrink: 0 }}>{isFolder ? "📁" : "📄"}</span>
                         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || (isFolder ? "未命名文件夹" : "无标题")}</span>
                       </h3>
-                      {!isFolder && (
-                        <div style={{ display: "flex", gap: 6, alignItems: "center", overflow: "hidden", paddingLeft: 20 }}>
-                          {(note.tags || []).map((t) => {
-                            const c = TC[t] || { bg: dark ? "#27272a" : "#f5f5f5", fg: dark ? "#a1a1aa" : "#999" };
-                            return <span key={t} style={{ fontSize: 12, color: c.fg, opacity: .75, whiteSpace: "nowrap" }}>{t}</span>;
-                          })}
-                          {(note.tags || []).length === 0 && <span style={{ fontSize: 12, color: T.textTag }}>无标签</span>}
-                        </div>
-                      )}
                       {isFolder && narrow && <div style={{ fontSize: 12, color: T.textMuted, paddingLeft: 20 }}>{itemCount} 个项目</div>}
                     </div>
                     {!narrow && (
@@ -1460,14 +1368,6 @@ ${body}
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "#fff", textShadow: "0 1px 6px rgba(0,0,0,.2)", lineHeight: 1.4, margin: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "60%" }}>
           {activeNote.title || "无标题"}
         </h1>
-        {(activeNote.tags || []).length > 0 && (
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            {(activeNote.tags || []).map((t) => {
-              const c = TC[t] || { bg: "#f5f5f5", fg: "#666" };
-              return <span key={t} style={{ padding: "2px 10px", borderRadius: 12, fontSize: 11, fontWeight: 600, background: "rgba(255,255,255,.88)", color: c.fg }}>{t}</span>;
-            })}
-          </div>
-        )}
       </div>
 
       <div style={{ padding: "20px 24px 0" }}>
@@ -1553,36 +1453,6 @@ ${body}
       <div style={{ padding: "24px" }}>
         <input placeholder="文章标题..." value={activeNote.title} onChange={(e) => update("title", e.target.value)}
           style={{ width: "100%", border: "none", fontSize: 28, fontWeight: 700, color: T.text, background: "transparent", padding: "0 0 16px", fontFamily: "'Noto Serif SC',serif", borderBottom: `1px solid ${T.border}`, marginBottom: 16 }} />
-
-        <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
-          <span style={{ fontSize: 13, color: T.textMuted }}>标签：</span>
-          {allTags.map((t) => {
-            const active = (activeNote.tags || []).includes(t);
-            const c = TC[t] || { bg: dark ? "#27272a" : "#f0f0f0", fg: dark ? "#a1a1aa" : "#666" };
-            return (
-              <button key={t} onClick={() => {
-                const tags = activeNote.tags || [];
-                update("tags", active ? tags.filter((x) => x !== t) : [...tags, t]);
-              }}
-                style={{ padding: "4px 12px", borderRadius: 14, border: active ? `1px solid ${c.fg}` : `1px solid ${T.borderDashed}`, background: active ? c.bg : T.inputBg, color: active ? c.fg : T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Serif SC',serif", transition: "all .15s" }}>
-                {t}
-              </button>
-            );
-          })}
-          <input
-            placeholder="新标签回车添加"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && e.target.value.trim()) {
-                const tag = e.target.value.trim();
-                if (!(activeNote.tags || []).includes(tag)) {
-                  update("tags", [...(activeNote.tags || []), tag]);
-                }
-                e.target.value = "";
-              }
-            }}
-            style={{ padding: "4px 10px", border: `1px solid ${T.borderDashed}`, borderRadius: 14, fontSize: 12, fontFamily: "'Noto Serif SC',serif", width: 120, background: T.inputBg, color: T.text }}
-          />
-        </div>
 
         <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 13, color: T.textMuted }}>附件脚本：</span>
