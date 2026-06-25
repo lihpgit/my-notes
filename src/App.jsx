@@ -117,25 +117,44 @@ function getAncestors(notes, startParentId) {
   return path;
 }
 
-// HTML 笔记在沙箱 iframe（无 allow-same-origin）里渲染，访问 localStorage/sessionStorage 会抛 SecurityError，
-// 导致页面自带脚本（目录折叠、字号记忆等）从读 storage 那一行起整段崩溃。这里在 srcDoc 最前面注入一段内存版
-// storage 垫片，让这类调用不再抛异常，从而保留沙箱隔离的同时让页面正常工作。
-const STORAGE_SHIM = `<script>(function(){function mk(){var m=Object.create(null);return{getItem:function(k){k=String(k);return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null},setItem:function(k,v){m[String(k)]=String(v)},removeItem:function(k){delete m[String(k)]},clear:function(){m=Object.create(null)},key:function(i){var a=Object.keys(m);return i>=0&&i<a.length?a[i]:null},get length(){return Object.keys(m).length}}}function inst(n){try{void window[n].length;return}catch(e){}try{Object.defineProperty(window,n,{value:mk(),configurable:true})}catch(e){}}inst('localStorage');inst('sessionStorage')})();</script>`;
-
 // 把 iframe 内文档的滚动位置实时回传父页，父页据此折叠/展开外层的面包屑+横幅+元信息，
 // 给正文腾出空间。iframe 自身仍是定长内部滚动，文档自带的固定目录/字号控件不受影响。
 const SCROLL_REPORTER = `<script>(function(){var last=-1;function post(){var y=window.scrollY||document.documentElement.scrollTop||0;if(y!==last){last=y;try{parent.postMessage({__notesScrollY:y},'*')}catch(e){}}}window.addEventListener('scroll',post,{passive:true});window.addEventListener('load',post)})();</script>`;
 
-const IFRAME_INJECT = STORAGE_SHIM + SCROLL_REPORTER;
+// HTML 笔记在沙箱 iframe（无 allow-same-origin）里渲染，访问 localStorage/sessionStorage 会抛 SecurityError，
+// 导致页面自带脚本（目录折叠、字号记忆等）从读 storage 那一行起整段崩溃。这里注入一个内存版 storage 垫片：
+//  · 用 seed 预填本笔记上次的存档 —— 文档自带的恢复逻辑直接 getItem 读到，无需改文档；
+//  · setItem/removeItem 时把 {key,value} postMessage 回父页，由父页用真 localStorage 按笔记持久化。
+// 这样既保留沙箱隔离（脚本仍碰不到父页/Supabase 会话），又让字号/目录折叠等状态跨刷新记住。
+function buildStorageShim(seed) {
+  const safe = JSON.stringify(seed || {}).replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  return `<script>(function(){var SEED=${safe};` +
+    `function mk(seed,persist){var m=Object.create(null);if(seed){for(var k in seed){m[k]=String(seed[k])}}` +
+    `function notify(k,v){if(persist){try{parent.postMessage({__notesLS:{k:k,v:v}},'*')}catch(e){}}}` +
+    `return{getItem:function(k){k=String(k);return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null},` +
+    `setItem:function(k,v){k=String(k);v=String(v);m[k]=v;notify(k,v)},` +
+    `removeItem:function(k){k=String(k);delete m[k];notify(k,null)},` +
+    `clear:function(){m=Object.create(null)},` +
+    `key:function(i){var a=Object.keys(m);return i>=0&&i<a.length?a[i]:null},` +
+    `get length(){return Object.keys(m).length}}}` +
+    `function inst(n,seed,persist){try{void window[n].length;return}catch(e){}try{Object.defineProperty(window,n,{value:mk(seed,persist),configurable:true})}catch(e){}}` +
+    `inst('localStorage',SEED,true);inst('sessionStorage',null,false)})();</script>`;
+}
 
-function withStorageShim(html) {
+function withStorageShim(html, seed) {
+  const inject = buildStorageShim(seed) + SCROLL_REPORTER;
   const src = html || "";
   const head = src.match(/<head[^>]*>/i);
-  if (head) return src.slice(0, head.index + head[0].length) + IFRAME_INJECT + src.slice(head.index + head[0].length);
+  if (head) return src.slice(0, head.index + head[0].length) + inject + src.slice(head.index + head[0].length);
   const htmlTag = src.match(/<html[^>]*>/i);
-  if (htmlTag) return src.slice(0, htmlTag.index + htmlTag[0].length) + IFRAME_INJECT + src.slice(htmlTag.index + htmlTag[0].length);
-  return IFRAME_INJECT + src;
+  if (htmlTag) return src.slice(0, htmlTag.index + htmlTag[0].length) + inject + src.slice(htmlTag.index + htmlTag[0].length);
+  return inject + src;
 }
+
+// HTML 笔记内嵌脚本的 localStorage 存档：按笔记 id 存在父页真 localStorage（容量上限保护）
+const htmlLSKey = (id) => `htmlLS:${id}`;
+function loadHtmlLS(id) { try { return JSON.parse(localStorage.getItem(htmlLSKey(id))) || {}; } catch { return {}; } }
+function saveHtmlLS(id, bag) { try { const s = JSON.stringify(bag); if (s.length > 50000) return; localStorage.setItem(htmlLSKey(id), s); } catch { /* 忽略写入异常（隐私模式/配额满） */ } }
 
 const LIGHT = {
   bg: "#f8f9fa", card: "#fff", text: "#1a1a1a", textSub: "#666", textMuted: "#999", textFaint: "#aaa", textPlaceholder: "#bbb", textTag: "#ccc",
@@ -285,6 +304,21 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   // 切换笔记时复位折叠状态
   useEffect(() => { setHtmlScrolled(false); }, [activeId]);
 
+  // HTML 笔记：接收 iframe 内 storage 写操作，按笔记 id 持久化到父页真 localStorage
+  useEffect(() => {
+    if (!activeId) return;
+    const onMsg = (e) => {
+      const d = e.data;
+      if (!d || !d.__notesLS || typeof d.__notesLS.k !== "string") return;
+      const { k, v } = d.__notesLS;
+      const bag = loadHtmlLS(activeId);
+      if (v === null || v === undefined) delete bag[k]; else bag[k] = String(v);
+      saveHtmlLS(activeId, bag);
+    };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, [activeId]);
+
   // 点击空白处关闭导出格式菜单
   useEffect(() => {
     if (!exportMenu) return;
@@ -366,6 +400,13 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   }
 
   const activeNote = notes.find((n) => n.id === activeId);
+
+  // HTML 笔记 srcDoc：注入垫片 + 预填本笔记存档。只随笔记 id/正文变化重算，
+  // 避免父页 setState（如滚动折叠）导致 iframe 重载、丢失滚动位置。
+  const htmlSrcDoc = useMemo(
+    () => (activeNote && activeNote.format === "html" ? withStorageShim(activeNote.content, loadHtmlLS(activeNote.id)) : ""),
+    [activeNote?.id, activeNote?.content]
+  );
 
   const filtered = useMemo(() => {
     let r;
@@ -503,6 +544,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     const paths = (activeNote.attachments || []).map((a) => a.path).filter(Boolean);
     await supabase.from("notes").delete().eq("id", activeId);
     if (paths.length) await supabase.storage.from("attachments").remove(paths);
+    try { localStorage.removeItem(htmlLSKey(activeId)); } catch { /* 清理本机 HTML 存档 */ }
     setNotes((p) => p.filter((n) => n.id !== activeId));
     setActiveId(null);
     setView("list");
@@ -1467,7 +1509,7 @@ ${body}
         <div style={{ padding: "0 0 20px" }}>
           <iframe
             title={activeNote.title || "HTML 笔记"}
-            srcDoc={withStorageShim(activeNote.content)}
+            srcDoc={htmlSrcDoc}
             sandbox="allow-scripts allow-popups allow-forms"
             style={{ width: "100%", height: htmlScrolled ? "calc(100vh - 48px)" : "calc(100vh - 230px)", minHeight: 400, border: "none", background: "#fff", transition: "height .3s ease" }} />
         </div>
