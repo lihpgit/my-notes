@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-「拾光笔记」是一个私人知识库 Web 应用，博客阅读风格界面，支持 Markdown 写作、文件夹目录树、标签分类、附件上传、云端同步。
+「拾光笔记」是一个私人知识库 Web 应用，博客阅读风格界面，支持 Markdown 写作、文件夹目录树、附件上传、云端同步。
 
 - **前端框架**：React 19 + Vite
 - **后端/数据库**：Supabase（PostgreSQL + Auth + Storage）
@@ -72,7 +72,7 @@ create table notes (
   title text default '',
   content text default '',                                   -- Markdown 原文，或 HTML 笔记的完整 HTML
   color jsonb,                                               -- 旧版字段，新版未使用
-  tags jsonb default '[]',                                   -- 标签数组，如 ["Android", "学习"]
+  tags jsonb default '[]',                                   -- 旧标签数组列，标签功能已移除、UI 不再使用，列保留
   banner integer default 0,                                  -- Banner 渐变色索引（0-7）
   created_at bigint,                                         -- 创建时间戳（毫秒）
   updated_at bigint,                                         -- 更新时间戳（毫秒）
@@ -126,18 +126,17 @@ create policy "用户只能删除自己的笔记"
 应用有 4 个视图，通过 `view` state 切换（非路由）：
 
 1. **登录页（AuthPage）**：邮箱密码登录/注册
-2. **列表页（view="list"）**：左侧文件夹目录树 + 标签筛选，右侧面包屑 + 文档列表，支持搜索、拖拽排序、导入导出
+2. **列表页（view="list"）**：左侧文件夹目录树，右侧面包屑 + 文档列表，支持搜索、拖拽排序、导入导出
 3. **阅读页（view="read"）**：博客风格文章展示，Markdown 渲染；HTML 笔记用 sandbox iframe 隔离渲染（只读）；PDF 笔记用 iframe 直接预览（只读，附「在新标签页打开」兜底链接）
-4. **编辑页（view="edit"）**：左右分屏，左 Markdown 编辑 + 右实时预览；支持标签、脚本、附件管理
+4. **编辑页（view="edit"）**：左右分屏，左 Markdown 编辑 + 右实时预览；支持脚本、附件管理
 
 虽然没有路由，但已通过 `history.pushState` / `popstate` 接管浏览器返回键，前进/后退可在视图间正常切换（仍无法通过 URL 直达某篇文章）。
 
 ### 已实现功能清单
 
 - **文档目录树**（Confluence 式）：文件夹作为独立实体（纯容器），侧边栏树形导航、展开/折叠、面包屑导航、移动文档/文件夹（防止移入自己的子树）、递归删除
-- **拖拽排序**：首页文档列表可拖拽排序（`sort_order` 持久化到云端，仅在无搜索/无标签筛选时可拖）；侧边栏目录树的文件夹也可拖拽排序（同一父级下，`sort_order` 持久化）；侧边栏标签可拖拽排序（仅 localStorage 本机持久化）。原生 HTML5 DnD，零依赖；dragstart 已补 `dataTransfer.setData` 兼容 Firefox
-- **自定义标签**：编辑页输入新标签回车即建；标签从笔记聚合派生，云端无独立实体；8 个老标签有预设配色，其余用灰色兜底
-- **暗黑模式**：🌙/☀️ 一键切换，localStorage 持久化，全套深色配色（含标签深色配色 TAG_COLORS_DARK）
+- **拖拽排序**：首页文档列表可拖拽排序（`sort_order` 持久化到云端，仅在无搜索时可拖）；侧边栏目录树的文件夹也可拖拽排序（同一父级下，`sort_order` 持久化）。原生 HTML5 DnD，零依赖；dragstart 已补 `dataTransfer.setData` 兼容 Firefox
+- **暗黑模式**：🌙/☀️ 一键切换，localStorage 持久化，全套深色配色
 - **阅读字号调节**：md 笔记阅读页右下角浮动 `A−/字号/A+` 控件，范围 13–28px，localStorage 持久化跨刷新保留。仅作用于 `.article-body` 根字号（内联 `fontSize` 覆盖），标题/代码/表格用 em 相对单位随之等比缩放；pdf/html 笔记是 iframe，不显示此控件
 - **导入**：支持 .md / .markdown / .txt / .html / .htm / .pdf / .docx / .doc，可批量。导入逻辑（`importMd`）按文件头嗅探真实类型（`kind`）：
   - **md / txt**：Markdown 入库，自动提取一级标题作为笔记标题
@@ -172,19 +171,8 @@ Supabase
 ### 关键常量
 
 ```javascript
-// 注意：预设标签列表 TAGS 已移除，标签现在从所有笔记的 tags 字段聚合派生，
-// 用户可在编辑页自由新建标签。以下 8 个老标签保留了专属配色：
-const TAG_COLORS = {       // 亮色模式配色
-  Android: { bg: "#dcfce7", fg: "#166534" },
-  iOS:     { bg: "#dbeafe", fg: "#1e40af" },
-  前端:    { bg: "#ffedd5", fg: "#9a3412" },
-  后端:    { bg: "#f3e8ff", fg: "#6b21a8" },
-  随笔:    { bg: "#fce7f3", fg: "#9d174d" },
-  学习:    { bg: "#ccfbf1", fg: "#115e59" },
-  工作:    { bg: "#fef9c3", fg: "#854d0e" },
-  生活:    { bg: "#f5f5f4", fg: "#44403c" },
-};
-const TAG_COLORS_DARK = { /* 同名标签的暗色模式配色，见 App.jsx */ };
+// 注意：标签功能（侧边栏筛选/编辑输入/卡片展示/拖拽排序/配色 TAG_COLORS）
+// 已于 2026-06 整体移除。数据库 notes.tags 列仍保留（新笔记默认 []），但 UI 不再使用。
 
 // 文章卡片 Banner 渐变色（8种），与旧版一致
 const BANNERS = [
@@ -252,13 +240,11 @@ npm run dev
 4. **编辑页移动端体验差**：列表页已做窄屏适配，但编辑页左右分屏仍是固定 1fr 1fr，手机上很挤
 5. **无目录导航（TOC）**：阅读页没有像博客那样的文章目录
 6. **无代码语法高亮**：代码块只有深色背景，没有语法着色。可集成 highlight.js 或 Prism.js
-7. **自定义标签无专属配色**：只有 8 个老标签有预设颜色，新建标签统一灰色，可考虑自动分配色板
-8. **标签排序仅本机生效**：标签拖拽顺序存 localStorage，多设备不同步（标签本身是派生数据，云端无实体表）
-9. **附件 bucket 为公开访问**：知道 URL 即可访问文件，应改为私有 bucket + signed URL
-10. **HTML 笔记体积风险**：HTML 原文整篇存入 content 字段，超大文件（>2MB）可能触发 Supabase 单条上限，目前只有前端警告
-11. **拖拽排序整批 upsert**：对当前列表所有文档重新编号后整批写库，多端同时操作可能互相覆盖
-12. **图片压缩只对新导入生效**：旧版本已上传的笔记不会自动压缩，需删除后重新导入才能享受压缩（用户已知悉）
-13. **旧版二进制 .doc 不支持**：只支持 docx / MHTML（Confluence 导出 Word）；真正的旧版二进制 .doc 会提示不支持，需先用 Office 另存为 .docx
+7. **附件 bucket 为公开访问**：知道 URL 即可访问文件，应改为私有 bucket + signed URL
+8. **HTML 笔记体积风险**：HTML 原文整篇存入 content 字段，超大文件（>2MB）可能触发 Supabase 单条上限，目前只有前端警告
+9. **拖拽排序整批 upsert**：对当前列表所有文档重新编号后整批写库，多端同时操作可能互相覆盖
+10. **图片压缩只对新导入生效**：旧版本已上传的笔记不会自动压缩，需删除后重新导入才能享受压缩（用户已知悉）
+11. **旧版二进制 .doc 不支持**：只支持 docx / MHTML（Confluence 导出 Word）；真正的旧版二进制 .doc 会提示不支持，需先用 Office 另存为 .docx
 
 ---
 
@@ -269,12 +255,11 @@ npm run dev
 - [x] 图片/文件上传（Supabase Storage 附件功能）
 - [x] 文档目录（文件夹树 + 面包屑 + 移动）
 - [x] 暗黑模式
-- [x] 自定义标签
 - [x] 文章导出为 .md 文件（另支持导出 .html）
 - [x] 导入 .md / .txt / .html（HTML 只读）
 - [x] 导入 .pdf / .docx / .doc（企业微信导出 PDF/Word、Confluence 导出 Word 即 MHTML）
 - [x] 上传图片自动压缩为 WebP、限宽 1920px（覆盖全部上传路径）
-- [x] 文章排序（首页拖拽排序 + 标签拖拽排序）
+- [x] 文章排序（首页拖拽排序）
 - [x] 浏览器返回键响应
 - [x] 列表页移动端/窄屏适配
 - [x] 内嵌脚本（上传/手写，阅读时下载）
@@ -291,14 +276,12 @@ npm run dev
 - [ ] 引入 react-router，支持 URL 直达文章
 - [ ] 文章置顶 / 收藏功能
 - [ ] 附件私有化（私有 bucket + signed URL）
-- [ ] 自定义标签自动配色
 - [ ] 文章版本历史 / 回收站
 
 ### 低优先级
 
 - [ ] 全文搜索优化（Supabase Full Text Search）
 - [ ] 多设备实时同步（Supabase Realtime）
-- [ ] 标签顺序云端同步
 - [ ] PWA 支持（离线可用）
 - [ ] 绑定自定义域名
 
