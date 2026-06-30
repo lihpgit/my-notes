@@ -137,7 +137,10 @@ create policy "用户只能删除自己的笔记"
 - **文档目录树**（Confluence 式）：文件夹作为独立实体（纯容器），侧边栏树形导航、展开/折叠、面包屑导航、移动文档/文件夹（防止移入自己的子树）、递归删除
 - **拖拽排序**：首页文档列表可拖拽排序（`sort_order` 持久化到云端，仅在无搜索时可拖）；侧边栏目录树的文件夹也可拖拽排序（同一父级下，`sort_order` 持久化）。原生 HTML5 DnD，零依赖；dragstart 已补 `dataTransfer.setData` 兼容 Firefox
 - **暗黑模式**：🌙/☀️ 一键切换，localStorage 持久化，全套深色配色
-- **阅读字号调节**：md 笔记阅读页右下角浮动 `A−/字号/A+` 控件，范围 13–28px，localStorage 持久化跨刷新保留。仅作用于 `.article-body` 根字号（内联 `fontSize` 覆盖），标题/代码/表格用 em 相对单位随之等比缩放；pdf/html 笔记是 iframe，不显示此控件
+- **阅读缩放调节**：阅读页右下角浮动 `A−/数值/A+` 控件，localStorage 持久化跨刷新保留。
+  - **md 笔记**：调正文字号，范围 13–28px，内联 `fontSize` 覆盖 `.article-body` 根字号，标题/代码/表格用 em 相对单位随之等比缩放
+  - **html 笔记**：调整体缩放，范围 80%–200%（等同浏览器 Ctrl +/−）。沙箱 iframe 父页碰不到其 DOM，靠注入脚本（`buildZoomScript`）监听父页 `postMessage({__notesZoom})` 并对 `documentElement` 设 CSS `zoom`；初始倍率在构建 srcDoc 时烘焙、调整时 postMessage 实时改（不重载 iframe、不丢滚动位置）。全局倍率（所有 html 笔记共用，localStorage 键 `htmlZoom`）
+  - **pdf 笔记**：不显示此控件，由浏览器原生 PDF 查看器自带的缩放工具栏控制
 - **导入**：支持 .md / .markdown / .txt / .html / .htm / .pdf / .docx / .doc，可批量。导入逻辑（`importMd`）按文件头嗅探真实类型（`kind`）：
   - **md / txt**：Markdown 入库，自动提取一级标题作为笔记标题
   - **html / htm**：HTML 原文入库标记 `format='html'`（只读，超 2MB 给出体积警告）；内嵌 base64 图片 >12KB 的会被抽出、压缩为 WebP 上传 Storage 并替换为 URL，小图标保留内联

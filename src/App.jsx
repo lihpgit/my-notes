@@ -121,8 +121,17 @@ function buildStorageShim(seed) {
     `inst('localStorage',SEED,true);inst('sessionStorage',null,false)})();</script>`;
 }
 
-function withStorageShim(html, seed) {
-  const inject = buildStorageShim(seed) + SCROLL_REPORTER;
+// HTML 笔记缩放：沙箱 iframe 父页碰不到其 DOM，只能注入一段脚本，监听父页 postMessage 的
+// {__notesZoom} 并对 documentElement 设 CSS zoom（等同浏览器 Ctrl +/− 的整体缩放）。
+// 初始值在构建 srcDoc 时烘焙进来，避免首帧闪一下原始大小。
+function buildZoomScript(initial) {
+  const z = typeof initial === "number" && initial >= 0.5 && initial <= 3 ? initial : 1;
+  return `<script>(function(){function ap(z){try{document.documentElement.style.zoom=z}catch(e){}}` +
+    `ap(${z});window.addEventListener('message',function(e){var d=e.data;if(d&&typeof d.__notesZoom==='number')ap(d.__notesZoom)})})();</script>`;
+}
+
+function withStorageShim(html, seed, zoom) {
+  const inject = buildStorageShim(seed) + SCROLL_REPORTER + buildZoomScript(zoom);
   const src = html || "";
   const head = src.match(/<head[^>]*>/i);
   if (head) return src.slice(0, head.index + head[0].length) + inject + src.slice(head.index + head[0].length);
@@ -135,6 +144,8 @@ function withStorageShim(html, seed) {
 const htmlLSKey = (id) => `htmlLS:${id}`;
 function loadHtmlLS(id) { try { return JSON.parse(localStorage.getItem(htmlLSKey(id))) || {}; } catch { return {}; } }
 function saveHtmlLS(id, bag) { try { const s = JSON.stringify(bag); if (s.length > 50000) return; localStorage.setItem(htmlLSKey(id), s); } catch { /* 忽略写入异常（隐私模式/配额满） */ } }
+// HTML 笔记缩放倍率（全局，所有 HTML 笔记共用，非按笔记）
+function loadHtmlZoom() { const v = parseFloat(typeof window !== "undefined" && localStorage.getItem("htmlZoom")); return v >= 0.8 && v <= 2 ? v : 1; }
 
 const LIGHT = {
   bg: "#f8f9fa", card: "#fff", text: "#1a1a1a", textSub: "#666", textMuted: "#999", textFaint: "#aaa", textPlaceholder: "#bbb", textTag: "#ccc",
@@ -263,6 +274,14 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     try { localStorage.setItem("readFontSize", n); } catch {}
     return n;
   });
+  const [htmlZoom, setHtmlZoom] = useState(loadHtmlZoom); // HTML 笔记缩放倍率
+  const htmlIframeRef = useRef(null);
+  const adjustZoom = (delta) => { // 改倍率：存 localStorage + postMessage 通知 iframe 内脚本（不重载 iframe）
+    const n = Math.min(2, Math.max(0.8, Math.round((htmlZoom + delta) * 10) / 10));
+    setHtmlZoom(n);
+    try { localStorage.setItem("htmlZoom", n); } catch {}
+    try { htmlIframeRef.current?.contentWindow?.postMessage({ __notesZoom: n }, "*"); } catch {}
+  };
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -384,8 +403,9 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
 
   // HTML 笔记 srcDoc：注入垫片 + 预填本笔记存档。只随笔记 id/正文变化重算，
   // 避免父页 setState（如滚动折叠）导致 iframe 重载、丢失滚动位置。
+  // 缩放倍率读 localStorage（非 state），故调缩放不会触发重算/重载 iframe，只靠 postMessage 实时改
   const htmlSrcDoc = useMemo(
-    () => (activeNote && activeNote.format === "html" ? withStorageShim(activeNote.content, loadHtmlLS(activeNote.id)) : ""),
+    () => (activeNote && activeNote.format === "html" ? withStorageShim(activeNote.content, loadHtmlLS(activeNote.id), loadHtmlZoom()) : ""),
     [activeNote?.id, activeNote?.content]
   );
 
@@ -1417,6 +1437,7 @@ ${body}
         // sandbox 开 allow-scripts 但不开 allow-same-origin —— 脚本能跑，却访问不到父页/Supabase 会话，XSS 被隔离在 iframe 内。
         <div style={{ padding: "0 0 20px" }}>
           <iframe
+            ref={htmlIframeRef}
             title={activeNote.title || "HTML 笔记"}
             srcDoc={htmlSrcDoc}
             sandbox="allow-scripts allow-popups allow-forms"
@@ -1437,14 +1458,22 @@ ${body}
       </div>
       )}
 
-      {/* 右下角字号调节：仅 md 笔记（pdf/html 是 iframe，由其自身控制） */}
-      {!["html", "pdf"].includes(activeNote.format) && (
+      {/* 右下角缩放调节：md 笔记调正文字号(px)，html 笔记调整体缩放(%)；pdf 由原生查看器自带工具栏控制 */}
+      {activeNote.format !== "pdf" && (() => {
+        const isHtml = activeNote.format === "html";
+        const dec = () => isHtml ? adjustZoom(-0.1) : adjustFont(-1);
+        const inc = () => isHtml ? adjustZoom(0.1) : adjustFont(1);
+        const atMin = isHtml ? htmlZoom <= 0.8 : readFontSize <= 13;
+        const atMax = isHtml ? htmlZoom >= 2 : readFontSize >= 28;
+        const label = isHtml ? Math.round(htmlZoom * 100) + "%" : readFontSize;
+        return (
         <div style={{ position: "fixed", right: 20, bottom: 24, zIndex: 200, display: "flex", alignItems: "center", gap: 2, background: T.card, border: `1px solid ${T.borderInput}`, borderRadius: 999, padding: 4, boxShadow: "0 4px 16px rgba(0,0,0,.18)" }}>
-          <button onClick={() => adjustFont(-1)} title="缩小字号" disabled={readFontSize <= 13} style={{ width: 34, height: 34, borderRadius: "50%", border: "none", background: "none", color: readFontSize <= 13 ? T.textPlaceholder : T.textSub, fontSize: 15, cursor: readFontSize <= 13 ? "default" : "pointer", fontFamily: "'Noto Serif SC',serif" }}>A<span style={{ fontSize: 11 }}>−</span></button>
-          <span style={{ minWidth: 30, textAlign: "center", fontSize: 12, color: T.textMuted, fontVariantNumeric: "tabular-nums" }}>{readFontSize}</span>
-          <button onClick={() => adjustFont(1)} title="放大字号" disabled={readFontSize >= 28} style={{ width: 34, height: 34, borderRadius: "50%", border: "none", background: "none", color: readFontSize >= 28 ? T.textPlaceholder : T.textSub, fontSize: 19, cursor: readFontSize >= 28 ? "default" : "pointer", fontFamily: "'Noto Serif SC',serif" }}>A<span style={{ fontSize: 13 }}>+</span></button>
+          <button onClick={dec} title="缩小" disabled={atMin} style={{ width: 34, height: 34, borderRadius: "50%", border: "none", background: "none", color: atMin ? T.textPlaceholder : T.textSub, fontSize: 15, cursor: atMin ? "default" : "pointer", fontFamily: "'Noto Serif SC',serif" }}>A<span style={{ fontSize: 11 }}>−</span></button>
+          <span style={{ minWidth: isHtml ? 42 : 30, textAlign: "center", fontSize: 12, color: T.textMuted, fontVariantNumeric: "tabular-nums" }}>{label}</span>
+          <button onClick={inc} title="放大" disabled={atMax} style={{ width: 34, height: 34, borderRadius: "50%", border: "none", background: "none", color: atMax ? T.textPlaceholder : T.textSub, fontSize: 19, cursor: atMax ? "default" : "pointer", fontFamily: "'Noto Serif SC',serif" }}>A<span style={{ fontSize: 13 }}>+</span></button>
         </div>
-      )}
+        );
+      })()}
 
       <div style={{ height: 60 }} />
     </div>
