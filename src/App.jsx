@@ -254,6 +254,15 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [dragId, setDragId] = useState(null); // 正在拖拽的文档 id
   const [dragOverId, setDragOverId] = useState(null); // 拖拽悬停的目标文档 id
   const [htmlScrolled, setHtmlScrolled] = useState(false); // HTML 笔记 iframe 已下滚 → 折叠外层横幅腾出空间
+  const [readFontSize, setReadFontSize] = useState(() => { // md 阅读页正文字号，localStorage 跨刷新保留
+    const v = parseInt(typeof window !== "undefined" && localStorage.getItem("readFontSize"), 10);
+    return v >= 13 && v <= 28 ? v : 16;
+  });
+  const adjustFont = (delta) => setReadFontSize((s) => {
+    const n = Math.min(28, Math.max(13, s + delta));
+    try { localStorage.setItem("readFontSize", n); } catch {}
+    return n;
+  });
   const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -1415,7 +1424,7 @@ ${body}
         </div>
       ) : (
       <div style={{ padding: "28px 24px 20px" }}>
-        <div className="article-body"
+        <div className="article-body" style={{ fontSize: readFontSize }}
           onClick={(e) => {
             const sl = e.target.closest(".script-link");
             if (sl) { const s = (activeNote.scripts || []).find(x => x.name === sl.getAttribute("data-script")); if (s) downloadScript(s); return; }
@@ -1427,6 +1436,16 @@ ${body}
           dangerouslySetInnerHTML={{ __html: renderContent(activeNote.content || "*暂无内容*", activeNote.scripts, activeNote.attachments) }} />
       </div>
       )}
+
+      {/* 右下角字号调节：仅 md 笔记（pdf/html 是 iframe，由其自身控制） */}
+      {!["html", "pdf"].includes(activeNote.format) && (
+        <div style={{ position: "fixed", right: 20, bottom: 24, zIndex: 200, display: "flex", alignItems: "center", gap: 2, background: T.card, border: `1px solid ${T.borderInput}`, borderRadius: 999, padding: 4, boxShadow: "0 4px 16px rgba(0,0,0,.18)" }}>
+          <button onClick={() => adjustFont(-1)} title="缩小字号" disabled={readFontSize <= 13} style={{ width: 34, height: 34, borderRadius: "50%", border: "none", background: "none", color: readFontSize <= 13 ? T.textPlaceholder : T.textSub, fontSize: 15, cursor: readFontSize <= 13 ? "default" : "pointer", fontFamily: "'Noto Serif SC',serif" }}>A<span style={{ fontSize: 11 }}>−</span></button>
+          <span style={{ minWidth: 30, textAlign: "center", fontSize: 12, color: T.textMuted, fontVariantNumeric: "tabular-nums" }}>{readFontSize}</span>
+          <button onClick={() => adjustFont(1)} title="放大字号" disabled={readFontSize >= 28} style={{ width: 34, height: 34, borderRadius: "50%", border: "none", background: "none", color: readFontSize >= 28 ? T.textPlaceholder : T.textSub, fontSize: 19, cursor: readFontSize >= 28 ? "default" : "pointer", fontFamily: "'Noto Serif SC',serif" }}>A<span style={{ fontSize: 13 }}>+</span></button>
+        </div>
+      )}
+
       <div style={{ height: 60 }} />
     </div>
   );}

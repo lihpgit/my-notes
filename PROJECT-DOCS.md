@@ -138,6 +138,7 @@ create policy "用户只能删除自己的笔记"
 - **拖拽排序**：首页文档列表可拖拽排序（`sort_order` 持久化到云端，仅在无搜索/无标签筛选时可拖）；侧边栏目录树的文件夹也可拖拽排序（同一父级下，`sort_order` 持久化）；侧边栏标签可拖拽排序（仅 localStorage 本机持久化）。原生 HTML5 DnD，零依赖；dragstart 已补 `dataTransfer.setData` 兼容 Firefox
 - **自定义标签**：编辑页输入新标签回车即建；标签从笔记聚合派生，云端无独立实体；8 个老标签有预设配色，其余用灰色兜底
 - **暗黑模式**：🌙/☀️ 一键切换，localStorage 持久化，全套深色配色（含标签深色配色 TAG_COLORS_DARK）
+- **阅读字号调节**：md 笔记阅读页右下角浮动 `A−/字号/A+` 控件，范围 13–28px，localStorage 持久化跨刷新保留。仅作用于 `.article-body` 根字号（内联 `fontSize` 覆盖），标题/代码/表格用 em 相对单位随之等比缩放；pdf/html 笔记是 iframe，不显示此控件
 - **导入**：支持 .md / .markdown / .txt / .html / .htm / .pdf / .docx / .doc，可批量。导入逻辑（`importMd`）按文件头嗅探真实类型（`kind`）：
   - **md / txt**：Markdown 入库，自动提取一级标题作为笔记标题
   - **html / htm**：HTML 原文入库标记 `format='html'`（只读，超 2MB 给出体积警告）；内嵌 base64 图片 >12KB 的会被抽出、压缩为 WebP 上传 Storage 并替换为 URL，小图标保留内联
