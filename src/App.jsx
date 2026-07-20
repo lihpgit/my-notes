@@ -147,6 +147,25 @@ function saveHtmlLS(id, bag) { try { const s = JSON.stringify(bag); if (s.length
 // HTML 笔记缩放倍率（全局，所有 HTML 笔记共用，非按笔记）
 function loadHtmlZoom() { const v = parseFloat(typeof window !== "undefined" && localStorage.getItem("htmlZoom")); return v >= 0.8 && v <= 2 ? v : 1; }
 
+// URL ↔ 视图状态互转：让每篇文章/每个目录都有可分享、可刷新的独立链接（?note=/?folder=）
+function buildUrl(view, noteId, folderId) {
+  const p = new URLSearchParams();
+  if ((view === "read" || view === "edit") && noteId) {
+    p.set("note", noteId);
+    if (view === "edit") p.set("edit", "1");
+  }
+  if (folderId) p.set("folder", folderId);
+  const qs = p.toString();
+  return qs ? `?${qs}` : window.location.pathname;
+}
+function readUrlState() {
+  const p = new URLSearchParams(window.location.search);
+  const note = p.get("note");
+  const folder = p.get("folder") || null;
+  if (note) return { view: p.get("edit") ? "edit" : "read", noteId: note, folderId: folder };
+  return { view: "list", noteId: null, folderId: folder };
+}
+
 const LIGHT = {
   bg: "#f8f9fa", card: "#fff", text: "#1a1a1a", textSub: "#666", textMuted: "#999", textFaint: "#aaa", textPlaceholder: "#bbb", textTag: "#ccc",
   border: "#eee", borderLight: "#f0f0f0", borderInput: "#e0e0e0", borderDashed: "#ddd",
@@ -347,7 +366,11 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const skipPopRef = useRef(false);
 
   useEffect(() => {
-    window.history.replaceState({ view: "list", noteId: null, folderId: null }, "");
+    const st = readUrlState();
+    window.history.replaceState({ view: st.view, noteId: st.noteId, folderId: st.folderId }, "", buildUrl(st.view, st.noteId, st.folderId));
+    if (st.view !== "list") setView(st.view);
+    if (st.noteId) setActiveId(st.noteId);
+    if (st.folderId) setCurrentFolder(st.folderId);
   }, []);
 
   useEffect(() => {
@@ -370,14 +393,15 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   }, []);
 
   function navPush(v, nid, fid) {
-    window.history.pushState({ view: v, noteId: nid || null, folderId: fid !== undefined ? fid : currentFolder }, "");
+    const folderId = fid !== undefined ? fid : currentFolder;
+    window.history.pushState({ view: v, noteId: nid || null, folderId }, "", buildUrl(v, nid, folderId));
     setView(v);
     setActiveId(nid || null);
   }
 
   function navToFolder(fid) {
     if (search) setSearch(""); // 进入文件夹时清空搜索，否则列表仍显示全局搜索结果
-    window.history.pushState({ view: "list", noteId: null, folderId: fid }, "");
+    window.history.pushState({ view: "list", noteId: null, folderId: fid }, "", buildUrl("list", null, fid));
     setCurrentFolder(fid);
     setView("list");
     setActiveId(null);
@@ -521,7 +545,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     setNotes((p) => p.filter((n) => n.id !== activeId));
     setActiveId(null);
     setView("list");
-    window.history.pushState({ view: "list", noteId: null, folderId: currentFolder }, "");
+    window.history.pushState({ view: "list", noteId: null, folderId: currentFolder }, "", buildUrl("list", null, currentFolder));
   }
 
   /* 删除单条笔记并清理其 Storage 附件（列表卡片删除入口；修复原先直删行导致附件成孤儿文件的问题） */
@@ -1381,7 +1405,7 @@ ${body}
       {/* 面包屑 */}
       {(readAncestors.length > 0 || activeNote.parent_id) && (
         <div style={{ padding: "8px 24px", fontSize: 12, color: T.textMuted, background: T.card, borderBottom: `1px solid ${T.borderLight}`, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
-          <span onClick={() => { setCurrentFolder(null); setView("list"); setActiveId(null); window.history.pushState({ view: "list", noteId: null, folderId: null }, ""); }} style={{ cursor: "pointer", textDecoration: "underline" }}>🏠 根目录</span>
+          <span onClick={() => { setCurrentFolder(null); setView("list"); setActiveId(null); window.history.pushState({ view: "list", noteId: null, folderId: null }, "", buildUrl("list", null, null)); }} style={{ cursor: "pointer", textDecoration: "underline" }}>🏠 根目录</span>
           {readAncestors.map((a) => (
             <span key={a.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <span style={{ color: T.textPlaceholder }}>/</span>
@@ -1487,7 +1511,7 @@ ${body}
       <header style={{ background: T.headerBg, borderBottom: `1px solid ${T.border}`, position: "sticky", top: 0, zIndex: 100 }}>
         <div style={{ padding: "0 24px", height: 48, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-            <button onClick={() => { setView("list"); setActiveId(null); setCurrentFolder(null); window.history.pushState({ view: "list", noteId: null, folderId: null }, ""); }} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 首页</button>
+            <button onClick={() => { setView("list"); setActiveId(null); setCurrentFolder(null); window.history.pushState({ view: "list", noteId: null, folderId: null }, "", buildUrl("list", null, null)); }} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 首页</button>
             <button onClick={() => window.history.back()} style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}>← 返回阅读</button>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
