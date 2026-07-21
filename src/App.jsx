@@ -1,8 +1,31 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { supabase } from "./supabase";
 import { marked } from "marked";
+import TurndownService from "turndown";
+import { gfm } from "turndown-plugin-gfm";
 
 marked.setOptions({ breaks: true, gfm: true });
+
+/* HTML → Markdown：导出给 AI 工具用，剥掉标签与内联样式噪音（Confluence/Word 导入的 HTML 尤其冗余），
+   token 更省、层级结构更清晰。转换器懒加载，只在首次导出时构造。 */
+let _td;
+function htmlToMd(html) {
+  if (!_td) {
+    _td = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced", bulletListMarker: "-", emDelimiter: "*" });
+    _td.use(gfm); // 表格、删除线、任务列表
+    _td.remove(["script", "style", "noscript"]);
+    // Confluence 的代码块是裸 <pre>（内部无 <code>），turndown 默认只认 pre>code，
+    // 不补这条规则会退化成普通段落、丢掉代码格式；顺带取出 brush: xxx 作为语言标注
+    _td.addRule("barePre", {
+      filter: (n) => n.nodeName === "PRE" && !n.querySelector("code"),
+      replacement: (_content, node) => {
+        const lang = ((node.getAttribute("data-syntaxhighlighter-params") || "").match(/brush:\s*([\w-]+)/) || [])[1] || "";
+        return "\n\n```" + lang + "\n" + (node.textContent || "").replace(/\n+$/, "") + "\n```\n\n";
+      },
+    });
+  }
+  return _td.turndown(html || "");
+}
 
 /* ───────── 常量 ───────── */
 const BANNERS = [
@@ -795,9 +818,11 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     URL.revokeObjectURL(url);
   }
 
-  /* ─── 导出 .md 文件 ─── */
+  /* ─── 导出 .md 文件 ───
+     HTML 笔记先转成 Markdown（正文更干净、喂给 AI 更省 token）；Markdown 笔记直接用原文 */
   function exportMd(note) {
-    const md = (note.title ? "# " + note.title + "\n\n" : "") + (note.content || "");
+    const body = note.format === "html" ? htmlToMd(note.content) : (note.content || "");
+    const md = (note.title ? "# " + note.title + "\n\n" : "") + body;
     triggerDownload(md, (note.title || "未命名笔记") + ".md", "text/markdown;charset=utf-8");
   }
 
@@ -1248,15 +1273,7 @@ ${body}
                         下载
                       </button>
                     )}
-                    {!isFolder && note.format === "html" && (
-                      <button onClick={(e) => { e.stopPropagation(); exportHtml(note); }}
-                        style={{ ...aBtn, color: T.textMuted }}
-                        onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
-                        导出
-                      </button>
-                    )}
-                    {!isFolder && !["html", "pdf"].includes(note.format) && (
+                    {!isFolder && note.format !== "pdf" && (
                       <div style={{ position: "relative" }}>
                         <button onClick={(e) => { e.stopPropagation(); setExportMenu(exportMenu === note.id ? null : note.id); }}
                           style={{ ...aBtn, color: T.textMuted }}
@@ -1271,7 +1288,7 @@ ${body}
                               style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 14px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}
                               onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
                               onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
-                              📄 导出 .md
+                              📄 导出 .md{note.format === "html" ? "（转换）" : ""}
                             </button>
                             <button onClick={(e) => { e.stopPropagation(); exportHtml(note); setExportMenu(null); }}
                               style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 14px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.textSub, fontFamily: "'Noto Serif SC',serif", borderTop: `1px solid ${T.borderLight}` }}
