@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { supabase } from "./supabase";
 import { marked } from "marked";
 import TurndownService from "turndown";
@@ -303,7 +304,7 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
   const [folderEditor, setFolderEditor] = useState(null); // 文件夹弹窗 {mode:'create'|'rename', id, parentId, name}
   const [narrow, setNarrow] = useState(typeof window !== "undefined" && window.innerWidth < 768);
   const [uploadingAtt, setUploadingAtt] = useState(false); // 附件上传中
-  const [exportMenu, setExportMenu] = useState(null); // 导出格式选择菜单：当前笔记 id
+  const [exportMenu, setExportMenu] = useState(null); // 导出格式菜单：{ id, top, right, up }，渲染到 body（见 openExportMenu）
   const [dragId, setDragId] = useState(null); // 正在拖拽的文档 id
   const [dragOverId, setDragOverId] = useState(null); // 拖拽悬停的目标文档 id
   const [htmlScrolled, setHtmlScrolled] = useState(false); // HTML 笔记 iframe 已下滚 → 折叠外层横幅腾出空间
@@ -361,12 +362,30 @@ function NotesApp({ user, onLogout, dark, onToggleDark, T }) {
     return () => window.removeEventListener("message", onMsg);
   }, [activeId]);
 
-  // 点击空白处关闭导出格式菜单
+  /* 导出菜单定位：菜单渲染到 body（见列表视图末尾的 createPortal）。
+     列表行带 card-anim 动画，fadeUp 用了 transform + fill-mode:both → 每行永久保留 transform，
+     各自形成层叠上下文，菜单若留在行内则 z-index 只在本行内生效，会被后面的行盖住（也点不中）；
+     列表容器还有 overflow:hidden，会把最后一行的菜单整个裁掉。渲染到 body 可一并规避这两点。 */
+  const EXPORT_MENU_H = 76; // 两个菜单项的估算高度，仅用于判断是否需要向上翻转
+  function openExportMenu(btn, id) {
+    if (exportMenu && exportMenu.id === id) { setExportMenu(null); return; } // 再次点击同一按钮 → 关闭
+    const r = btn.getBoundingClientRect();
+    const up = r.bottom + 4 + EXPORT_MENU_H > window.innerHeight; // 贴近视口底部时改为向上展开
+    setExportMenu({ id, top: up ? r.top - 4 - EXPORT_MENU_H : r.bottom + 4, right: window.innerWidth - r.right, up });
+  }
+
+  // 点击空白处关闭；菜单是 fixed 定位，滚动/缩放后位置会失准，一并关闭
   useEffect(() => {
     if (!exportMenu) return;
     const close = () => setExportMenu(null);
     window.addEventListener("click", close);
-    return () => window.removeEventListener("click", close);
+    window.addEventListener("scroll", close, true); // 捕获阶段：内层滚动容器也能收到
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
   }, [exportMenu]);
 
   // 文件夹集合 + 有效父级（父级必须是文件夹，否则视为根目录）
@@ -1274,31 +1293,12 @@ ${body}
                       </button>
                     )}
                     {!isFolder && note.format !== "pdf" && (
-                      <div style={{ position: "relative" }}>
-                        <button onClick={(e) => { e.stopPropagation(); setExportMenu(exportMenu === note.id ? null : note.id); }}
-                          style={{ ...aBtn, color: T.textMuted }}
-                          onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
-                          导出 ▾
-                        </button>
-                        {exportMenu === note.id && (
-                          <div onClick={(e) => e.stopPropagation()}
-                            style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 20, background: T.card, border: `1px solid ${T.borderInput}`, borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,.15)", overflow: "hidden", minWidth: 120 }}>
-                            <button onClick={(e) => { e.stopPropagation(); exportMd(note); setExportMenu(null); }}
-                              style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 14px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.textSub, fontFamily: "'Noto Serif SC',serif" }}
-                              onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
-                              onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
-                              📄 导出 .md{note.format === "html" ? "（转换）" : ""}
-                            </button>
-                            <button onClick={(e) => { e.stopPropagation(); exportHtml(note); setExportMenu(null); }}
-                              style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 14px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.textSub, fontFamily: "'Noto Serif SC',serif", borderTop: `1px solid ${T.borderLight}` }}
-                              onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
-                              onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
-                              🌐 导出 .html
-                            </button>
-                          </div>
-                        )}
-                      </div>
+                      <button onClick={(e) => { e.stopPropagation(); openExportMenu(e.currentTarget, note.id); }}
+                        style={{ ...aBtn, color: T.textMuted }}
+                        onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.borderColor = T.borderInput; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.opacity = ".6"; e.currentTarget.style.borderColor = "transparent"; }}>
+                        导出 ▾
+                      </button>
                     )}
                     <button onClick={(e) => {
                       e.stopPropagation();
@@ -1320,6 +1320,27 @@ ${body}
           </div>
         </div>
       </div>
+
+      {/* ── 导出格式菜单：渲染到 body，避开行 transform 造成的层叠上下文与列表容器的 overflow 裁剪 ── */}
+      {exportMenu && (() => {
+        const note = notes.find((n) => n.id === exportMenu.id);
+        if (!note) return null;
+        const item = { display: "block", width: "100%", textAlign: "left", padding: "8px 14px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.textSub, fontFamily: "'Noto Serif SC',serif", whiteSpace: "nowrap" };
+        return createPortal(
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ position: "fixed", top: exportMenu.top, right: exportMenu.right, zIndex: 900, background: T.card, border: `1px solid ${T.borderInput}`, borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,.15)", overflow: "hidden", minWidth: 120 }}>
+            <button onClick={() => { exportMd(note); setExportMenu(null); }} style={item}
+              onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
+              onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
+              📄 导出 .md{note.format === "html" ? "（转换）" : ""}
+            </button>
+            <button onClick={() => { exportHtml(note); setExportMenu(null); }} style={{ ...item, borderTop: `1px solid ${T.borderLight}` }}
+              onMouseEnter={(e) => e.currentTarget.style.background = T.listHover}
+              onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
+              🌐 导出 .html
+            </button>
+          </div>, document.body);
+      })()}
 
       {/* ── 移动弹窗（目标只能是文件夹或根目录） ── */}
       {moveTarget && (() => {
